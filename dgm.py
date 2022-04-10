@@ -766,7 +766,7 @@ class DGG_LearnableK(nn.Module):
     ):
         super(DGG_LearnableK, self).__init__()
 
-        torch.manual_seed(0)
+        # torch.manual_seed(0)
 
         self.in_dim = in_dim
         self.latent_dim = latent_dim
@@ -852,8 +852,10 @@ class DGG_LearnableK(nn.Module):
         else:
             edge_prob = F.softmax(log_p / temp, dim=-1)
 
-        # Sort edge probabilities in DESCENDING order
-        sorted, idxs = torch.sort(edge_prob, dim=-1, descending=True)
+        # Sort edge probabilities in ASCENDING order
+        sorted, idxs = torch.sort(edge_prob, dim=-1, descending=False)
+        # print('     edge prob', edge_prob)
+        # print('     sorted', sorted)
 
         # Get smooth top-k (smooth first-k elements really, as edge probs are sorted)
         if self.k_net_input == "raw":
@@ -863,20 +865,24 @@ class DGG_LearnableK(nn.Module):
             # use projected input to get k
             k = self.k_net(x_proj)  # [B, N, 1]
 
-        # Take exponential of k and add bias
-        k = k + self.k_bias  # [B, N, 1]
-        k = torch.clamp(k, min=self.k_bias, max=N)
+        # Keep k between -1 and 1
+        k = torch.tanh(k)
+        # print('    k', k.mean())
 
-        # Calculate first_k IN
-        t = torch.arange(N).reshape(1, 1, -1).cuda() * -1
-        w = 1
-        first_k = 0.5 * (1 + torch.tanh((t + k) / w))
+        # Calculate first_k
+        t = torch.arange(N).reshape(1, 1, -1).cuda()    # base domain
+        t = (t / N) * 2 - 1                             # squeeze to [-1, 1]
+        w = 0.5                                         # sharpness parameter
+        first_k = 0.5 * (1 + torch.tanh((t + k) / w))   # higher k = more items closer to 1
+        # print('    first k', first_k)
 
         # Multiply sorted edge probabilities by first-k
         first_k_prob = sorted * first_k
+        # print('    first k prob', first_k_prob)
 
         # Unsort
         adj = first_k_prob.clone().scatter_(dim=-1, index=idxs, src=first_k_prob)
+        # print('    adj', adj)
 
         # check adjacency argmax equals edge_prob argmax
         # print(
@@ -887,13 +893,34 @@ class DGG_LearnableK(nn.Module):
             # return adjacency matrix with softmax probabilities
             return adj
 
-        # if hard adj desired, get matrix of ones and multiply by first_k
+        # if hard adj desired, threshold first_k and scatter
         adj_hard = torch.ones_like(adj)
-        adj_hard.scatter_(dim=-1, index=idxs, src=first_k)
+        adj_hard.scatter_(dim=-1, index=idxs, src=(first_k > 0.48).float())
+        # print('    adj hard', adj_hard)
         adj_hard = (adj_hard - adj).detach() + adj
+        # print('    adj hard', adj_hard)
 
         assert torch.any(torch.isnan(adj_hard)) == False
         assert torch.any(torch.isinf(adj_hard)) == False
+
+        # plt.imshow(edge_prob.detach().cpu()[0])
+        # plt.title('edge prob')
+        # plt.show()
+        # plt.imshow(sorted.detach().cpu()[0])
+        # plt.title('sorted')
+        # plt.show()
+        # plt.imshow(first_k.detach().cpu()[0])
+        # plt.title('first k')
+        # plt.show()
+        # plt.imshow(first_k_prob.detach().cpu()[0])
+        # plt.title('first k prob')
+        # plt.show()
+        # plt.imshow(adj.detach().cpu()[0])
+        # plt.title('adj')
+        # plt.show()
+        # plt.imshow(adj_hard.detach().cpu()[0])
+        # plt.title('adj hard')
+        # plt.show()
 
         return adj_hard
 
@@ -905,14 +932,14 @@ class LearnableKEncoder(nn.Module):
         self.learn_k_bias = learn_k_bias
         # Option 1, use input to get mu, var in latent dim and
         # then project down to 1
-        self.k_mu = nn.Sequential(nn.Linear(in_dim, latent_dim), nn.ReLU(inplace=True))
+        self.k_mu = nn.Sequential(
+            nn.Linear(in_dim, latent_dim),
+            # nn.ReLU(inplace=True)
+        )
         self.k_logvar = nn.Linear(in_dim, latent_dim)
         self.k_project = nn.Sequential(
-            nn.Linear(latent_dim, 1), nn.ReLU(inplace=True)  # want k to be positive
-        )
-        self.k_bias = nn.Sequential(
             nn.Linear(latent_dim, 1),
-            nn.ReLU(inplace=True),  # want k bias to be positive
+            # nn.ReLU(inplace=True)  # want k to be positive
         )
 
     def latent_sample(self, mu, logvar):
@@ -933,11 +960,7 @@ class LearnableKEncoder(nn.Module):
         latent_k = self.latent_sample(latent_k_mu, latent_k_logvar)
         k = self.k_project(latent_k)  # [B, N, 1]
 
-        if self.learn_k_bias:
-            k_bias = self.k_bias(latent_k)
-            return k + k_bias
-        else:
-            return k
+        return k
 
 
 def smooth_heaviside(x, t):
@@ -1379,14 +1402,14 @@ def tanh_test_exp(k):
     print("w", w.grad)
     print("y", y.grad)
 
-    plt.scatter(t, x_topk.detach())
-    # plt.scatter(t, y.detach())
-    plt.scatter(t, x_topk_gt.detach())
-    plt.show()
+    # plt.scatter(t, x_topk.detach())
+    # # plt.scatter(t, y.detach())
+    # plt.scatter(t, x_topk_gt.detach())
+    # plt.show()
 
 
 def tanh_test(k):
-    N = 30
+    N = 3000
     k = torch.tensor(k, requires_grad=True)
     w = torch.tensor(1.0, requires_grad=True)
     t = torch.arange(start=-N, end=0.0)
@@ -1413,13 +1436,30 @@ def tanh_test(k):
     print("w", w.grad)
     print("y", y.grad)
 
-    plt.scatter(t, x_topk.detach())
-    # plt.scatter(t, y.detach())
-    plt.scatter(t, x_topk_gt.detach())
-    plt.show()
+    # plt.scatter(t, x_topk.detach())
+    # # plt.scatter(t, y.detach())
+    # plt.scatter(t, x_topk_gt.detach())
+    # plt.show()
+
+def tanh_plot(k=0, w=1):
+    N = 50
+    x = torch.arange(N)
+    x = (x / N) * 2 - 1
+    y = torch.tanh((x + k) / w)
+
+    plt.scatter(x, 0.5 * (1 + y))
+    plt.scatter(x, torch.sigmoid(y))
+
 
 
 if __name__ == "__main__":
 
-    tanh_test_exp(2.5)
-    tanh_test(12.2)
+    # tanh_test_exp(2.5)
+    # tanh_test(12.2)
+
+    tanh_plot(k=0, w=0.5)
+    tanh_plot(k=0.5, w=0.5)
+    # tanh_plot(k=-0.5, w=0.5)
+    tanh_plot(k=-1, w=0.5)
+    plt.show()
+

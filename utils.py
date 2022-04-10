@@ -42,6 +42,16 @@ def sys_normalized_adjacency(adj):
     d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
     return d_mat_inv_sqrt.dot(adj).dot(d_mat_inv_sqrt).tocoo()
 
+def torch_normalized_adjacency(adj):
+    adj = adj + torch.eye(adj.shape[0], device=adj.device)
+    row_sum = adj.sum(1)
+    row_sum = (row_sum == 0) * 1 + row_sum
+    d_inv_sqrt = (row_sum ** -0.5).flatten()
+    d_inv_sqrt[torch.isinf(d_inv_sqrt)] = 0.0
+    d_mat_inv_sqrt = torch.diag(d_inv_sqrt)
+    norm_adj = d_mat_inv_sqrt @ adj @ d_mat_inv_sqrt
+    return norm_adj
+
 
 def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     """Convert a scipy sparse matrix to a torch sparse tensor."""

@@ -5,7 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 from dgm import DGG_LearnableK
-
+from utils import torch_normalized_adjacency
 class GraphConvolution(nn.Module):
     def __init__(self, in_features, out_features, residual=False, variant=False):
         super(GraphConvolution, self).__init__()
@@ -114,6 +114,11 @@ class GCNII_DGG(nn.Module):
         x: [N, dim]
         adj: [N, N]
         """
+
+        # x = x[:5]
+        # adj = adj.to_dense()[:5].to_sparse()
+        # print(adj.to_dense().sum(-1).mean(), adj.to_dense().sum(-1).max(), adj.to_dense().sum(-1).min())
+
         _layers = []
 
         x = F.dropout(x, self.dropout, training=self.training)
@@ -129,7 +134,8 @@ class GCNII_DGG(nn.Module):
                     x=layer_inner.unsqueeze(0), temp=self.dgm_temp, noise=self.training
                 )
                 adj = adj.squeeze(0)    # [N, N]
-                print('adj', adj_og.sum(-1).mean(), adj.sum(-1).mean())
+                adj = torch_normalized_adjacency(adj) * adj_og.to_dense()
+                # print('adj', adj.sum(-1).mean().item(), adj.sum(-1).max().item(), adj.sum(-1).mean().item())
 
             layer_inner = F.dropout(layer_inner, self.dropout, training=self.training)
             layer_inner = self.act_fn(

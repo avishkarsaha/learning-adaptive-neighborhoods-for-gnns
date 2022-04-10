@@ -23,11 +23,11 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_small_graphs_dgg", help="experiment name"
+    "--expname", type=str, default="debug_small_graphs_dgg_with_adj_og", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
-    "--epochs", type=int, default=100, help="Number of epochs to train."
+    "--epochs", type=int, default=1000, help="Number of epochs to train."
 )
 parser.add_argument("--lr", type=float, default=0.01, help="learning rate.")
 parser.add_argument(
@@ -41,7 +41,7 @@ parser.add_argument("--hidden", type=int, default=64, help="hidden dimensions.")
 parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
-parser.add_argument("--patience", type=int, default=100, help="Patience")
+parser.add_argument("--patience", type=int, default=1000, help="Patience")
 parser.add_argument("--data", default="cora", help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
@@ -161,13 +161,47 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
     )
 
 
-def train(model, optimizer, features, adj, labels, idx_train, device):
+def train(args, model, optimizer, features, adj, labels, idx_train, device):
     model.train()
     optimizer.zero_grad()
     output = model(features, adj)
     acc_train = accuracy(output[idx_train], labels[idx_train].to(device))
     loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
     loss_train.backward()
+
+    # for name, p in model.dggs.named_parameters():
+    #     print(name, p.grad.max().item(),  p.grad.mean().item(), p.grad.min().item())
+
+    # if args.grad_clip != -1:
+    #     torch.nn.utils.clip_grad_norm_(
+    #         model.dggs.parameters(), max_norm=args.grad_clip
+    #     )
+    #
+    # for name, p in model.dggs.named_parameters():
+    #     print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
+
+    optimizer.step()
+    return loss_train.item(), acc_train.item()
+
+def train_debug(args, model, optimizer, features, adj, labels, idx_train, device):
+    model.train()
+    optimizer.zero_grad()
+    output = model(features, adj)
+    acc_train = accuracy(output, labels.to(device))
+    loss_train = F.nll_loss(output, labels.to(device))
+    loss_train.backward()
+
+    # for name, p in model.named_parameters():
+    #     print(name, p.grad.max().item(),  p.grad.mean().item(), p.grad.min().item())
+
+    # if args.grad_clip != -1:
+    #     torch.nn.utils.clip_grad_norm_(
+    #         model.dggs.parameters(), max_norm=args.grad_clip
+    #     )
+    #
+    # for name, p in model.dggs.named_parameters():
+    #     print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
+
     optimizer.step()
     return loss_train.item(), acc_train.item()
 
@@ -259,7 +293,7 @@ if __name__ == "__main__":
     acc = 0
     for epoch in range(args.epochs):
         loss_tra, acc_tra = train(
-            model, optimizer, features, adj, labels, idx_train, device
+            args, model, optimizer, features, adj, labels, idx_train, device
         )
         loss_val, acc_val = validate(model, features, adj, labels, idx_val, device)
         acc_test = test(model, features, adj, labels, idx_test, device)[1]
