@@ -13,6 +13,7 @@ from utils import *
 import model as models
 import uuid
 from torch.utils.tensorboard import SummaryWriter
+import shutil
 
 # Training settings
 parser = argparse.ArgumentParser()
@@ -23,11 +24,11 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_small_graphs_dgg_with_adj_og", help="experiment name"
+    "--expname", type=str, default="debug_cora_dgg_denoising_degree_aware_softmax_first_k", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
-    "--epochs", type=int, default=1000, help="Number of epochs to train."
+    "--epochs", type=int, default=5000, help="Number of epochs to train."
 )
 parser.add_argument("--lr", type=float, default=0.01, help="learning rate.")
 parser.add_argument(
@@ -41,7 +42,7 @@ parser.add_argument("--hidden", type=int, default=64, help="hidden dimensions.")
 parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
-parser.add_argument("--patience", type=int, default=1000, help="Patience")
+parser.add_argument("--patience", type=int, default=2000, help="Patience")
 parser.add_argument("--data", default="cora", help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
@@ -82,14 +83,14 @@ parser.add_argument(
 parser.add_argument(
     "--st_gumbel_softmax",
     type=str2bool,
-    default=True,
+    default=False,
     help="Whether to do straight through gumbel softmax "
     "(argmax in forward, softmax in backward) or just softmax top k in both",
 )
 parser.add_argument(
     "--dgm_temp",
     type=float,
-    default=2,
+    default=10,
     help="Gumvel softmax temperature",
 )
 parser.add_argument(
@@ -183,12 +184,15 @@ def train(args, model, optimizer, features, adj, labels, idx_train, device):
     optimizer.step()
     return loss_train.item(), acc_train.item()
 
-def train_debug(args, model, optimizer, features, adj, labels, idx_train, device):
+def train_debug(
+        args, model, optimizer, features, adj, labels, idx_train,
+        device, epoch, writer
+):
     model.train()
     optimizer.zero_grad()
-    output = model(features, adj)
-    acc_train = accuracy(output, labels.to(device))
-    loss_train = F.nll_loss(output, labels.to(device))
+    output = model(features, adj, epoch, writer)
+    acc_train = accuracy(output[idx_train], labels[idx_train].to(device))
+    loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
     loss_train.backward()
 
     # for name, p in model.named_parameters():
@@ -246,11 +250,21 @@ if __name__ == "__main__":
     outdir = os.path.join(args.root, "outputs")
     expdir = os.path.join(outdir, args.expname)
     tbdir = os.path.join(expdir, "tb")
+    codedir = os.path.join(expdir, 'code')
     os.makedirs(outdir, exist_ok=True)
     os.makedirs(expdir, exist_ok=True)
     os.makedirs(tbdir, exist_ok=True)
+    os.makedirs(codedir, exist_ok=True)
     checkpt_file = os.path.join(expdir, uuid.uuid4().hex + ".pt")
     print(checkpt_file)
+
+    # Make copy of code
+    python_files = [f for f in os.listdir(args.root) if '.py' in f]
+    for f in python_files:
+        shutil.copyfile(
+            src=os.path.join(args.root, f),
+            dst=os.path.join(codedir, f)
+        )
 
     # Tensorboard writer
     writer = SummaryWriter(tbdir)
@@ -292,8 +306,8 @@ if __name__ == "__main__":
     best_epoch = 0
     acc = 0
     for epoch in range(args.epochs):
-        loss_tra, acc_tra = train(
-            args, model, optimizer, features, adj, labels, idx_train, device
+        loss_tra, acc_tra = train_debug(
+            args, model, optimizer, features, adj, labels, idx_train, device, epoch, writer
         )
         loss_val, acc_val = validate(model, features, adj, labels, idx_val, device)
         acc_test = test(model, features, adj, labels, idx_test, device)[1]

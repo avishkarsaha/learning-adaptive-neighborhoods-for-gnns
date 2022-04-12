@@ -35,7 +35,7 @@ def gumbel_softmax_sample(logits, temperature, self_loops_noise=False):
         noise = sample_gumbel(logits.size()) * zero_self_loops
 
     y = logits + noise
-    y = F.softmax(y / temperature, dim=-1)
+    # y = F.softmax(y / temperature, dim=-1)
     return y
 
 
@@ -755,6 +755,7 @@ class DGG_LearnableK(nn.Module):
     def __init__(
         self,
         in_dim=32,
+        adj_dim=1,
         latent_dim=64,
         k_bias=1.0,
         hard=False,
@@ -769,6 +770,7 @@ class DGG_LearnableK(nn.Module):
         # torch.manual_seed(0)
 
         self.in_dim = in_dim
+        self.adj_dim = adj_dim
         self.latent_dim = latent_dim
         self.hard = hard
         self.self_loops_noise = self_loops_noise
@@ -779,94 +781,90 @@ class DGG_LearnableK(nn.Module):
         self.input_project = nn.Sequential(
             nn.Linear(in_dim, latent_dim),
             nn.LeakyReLU(),
-            nn.Softmax(dim=-1),
+        )
+        self.input_degree_project = nn.Sequential(
+            nn.Linear(1, latent_dim),
+            nn.LeakyReLU(),
+        )
+        self.combine_input_degree = nn.Sequential(
+            nn.Linear(2 * latent_dim, latent_dim),
+            nn.LeakyReLU(),
         )
 
-        # Distance function
-        if dist_fn == "metric":
-            self.t = nn.Parameter(torch.ones(1))
-            nn.init.ones_(self.t)
-        elif dist_fn == "mlp":
-            self.distance = nn.Sequential(
-                nn.Linear(latent_dim * 2, 1),
-                nn.LeakyReLU(),
-                nn.Softmax(dim=-1),
-            )
+        self.input_adj_project = nn.Sequential(
+            nn.Linear(in_dim * 2 + adj_dim, latent_dim),
+            nn.LeakyReLU(),
+            nn.Linear(latent_dim, 1),
+        )
 
         # Learnable K
         self.register_buffer("k_bias", torch.tensor(k_bias))
 
-        if k_net_input == "raw":
-            # Option 1, use input to get mu, var in latent dim and then project down to 1
-            self.k_net = LearnableKEncoder(
-                in_dim=in_dim,
-                latent_dim=latent_dim,
-            )
-        elif k_net_input == "embedded":
-            # Option 3, use projected input to get mu, var in latent dim and
-            # then project down to 1
-            self.k_net = LearnableKEncoder(
-                in_dim=latent_dim, latent_dim=latent_dim, option=1
-            )
 
-    def forward(self, x, temp, noise=True):
+        # Option 3, use projected input to get mu, var in latent dim and
+        # then project down to 1
+        self.k_net = LearnableKEncoder(
+            in_dim=latent_dim, latent_dim=latent_dim
+        )
+
+    def forward(self, x, in_adj, temp, noise=True):
         """
 
         Args:
-            x: input points [B, N, dim]
+            x: input points [N, dim]
+            in_adj: unnormalized sparse adjacency matrix (coalesced) [N, N]
         Returns:
-            adj: adjacency between points in each batch [B, N, N]
+            adj: adjacency matrix [N, N]
         """
+        assert x.ndim ==  2
+        assert len(in_adj.shape) == 2
+
         # get number of nodes
         N = x.shape[-2]
 
-        # Embed input features [B, N, dim]
-        x_proj = self.input_project(x)
+        # embed input and adjacency to get initial edge probabilities
+        u = x[in_adj.indices()[0, :]]                   # [n, dim]
+        v = x[in_adj.indices()[1, :]]                   # [n, dim]
+        auv = in_adj.values().unsqueeze(-1)             # [n, 1]
+        u_v_auv = torch.concat([u, v, auv], dim=-1)     # [n, dim + dim + 1]
+        z = self.input_adj_project(u_v_auv).flatten()   # [n]
+        z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
+        log_prob = torch.sparse.log_softmax(z_matrix, dim=1)    # [N, N]
 
-        if self.dist_fn == "metric":
-            # calculate distance/similarity between input nodes
-            dist = torch.cdist(x_proj, x_proj, p=2)
-            prob = torch.exp(-self.t * dist)  # [B, N, N]
-        elif self.dist_fn == "mlp":
-            # Pass points pairwise through MLP [B, N, dim] ---> [B, N, N, dim * 2]
-            x_pairwise = torch.cat(
-                [
-                    x_proj.unsqueeze(2).repeat(1, 1, N, 1),
-                    x_proj.unsqueeze(1).repeat(1, N, 1, 1),
-                ],
-                dim=-1,
-            )
-            prob = self.distance(x_pairwise).squeeze(-1)  # [B, N, N]
-
-        # Log probabilities [B, N, N]
-        log_p = torch.log(prob)
+        # --------- NOW INCLUDES BATCH DIMENSION -------- #
+        # prepare input features and log probs for rest of function
+        x = x.unsqueeze(0)                          # [1, N, dim]
+        log_p = log_prob.to_dense().unsqueeze(0)    # [1, N, N]
 
         if noise:
             # During training sample from Gumbel Softmax [B, N, N]
-            edge_prob = torch.stack(
+            edge_log_p = torch.stack(
                 [
                     gumbel_softmax_sample(batch, temp, self.self_loops_noise)
                     for batch in log_p
                 ]
             )
         else:
-            edge_prob = F.softmax(log_p / temp, dim=-1)
+            edge_log_p = log_p
 
         # Sort edge probabilities in ASCENDING order
-        sorted, idxs = torch.sort(edge_prob, dim=-1, descending=False)
+        sorted, idxs = torch.sort(edge_log_p, dim=-1, descending=False)
         # print('     edge prob', edge_prob)
         # print('     sorted', sorted)
 
-        # Get smooth top-k (smooth first-k elements really, as edge probs are sorted)
-        if self.k_net_input == "raw":
-            # use input to get k
-            k = self.k_net(x)  # [B, N, 1]
-        elif self.k_net_input == "embedded":
-            # use projected input to get k
-            k = self.k_net(x_proj)  # [B, N, 1]
+        # Get smooth top-k
+        in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1) # [N, 1, 1]
+        degree = self.input_degree_project(in_degree)           # [1, N, dim]
+        x_proj = self.input_project(x)                          # [1, N, dim]
+
+        feats_for_k = torch.cat([degree, x_proj], dim=-1)       # [1, N, 2 x dim]
+        in_k_feats = self.combine_input_degree(feats_for_k)
+
+        # use projected input to get k
+        k = self.k_net(in_k_feats)  # [B, N, 1]
 
         # Keep k between -1 and 1
-        k = torch.tanh(k)
+        # k = torch.tanh(k)
         # print('    k', k.mean())
 
         # Calculate first_k
@@ -876,8 +874,9 @@ class DGG_LearnableK(nn.Module):
         first_k = 0.5 * (1 + torch.tanh((t + k) / w))   # higher k = more items closer to 1
         # print('    first k', first_k)
 
-        # Multiply sorted edge probabilities by first-k
-        first_k_prob = sorted * first_k
+        # Multiply sorted edge log probabilities by first-k and then softmax
+        first_k_log_prob = sorted * first_k
+        first_k_prob = torch.softmax(first_k_log_prob / temp, dim=-1)
         # print('    first k prob', first_k_prob)
 
         # Unsort
@@ -891,11 +890,11 @@ class DGG_LearnableK(nn.Module):
 
         if not self.hard:
             # return adjacency matrix with softmax probabilities
-            return adj
+            return adj, k
 
         # if hard adj desired, threshold first_k and scatter
         adj_hard = torch.ones_like(adj)
-        adj_hard.scatter_(dim=-1, index=idxs, src=(first_k > 0.48).float())
+        adj_hard.scatter_(dim=-1, index=idxs, src=(first_k > 0.8).float())
         # print('    adj hard', adj_hard)
         adj_hard = (adj_hard - adj).detach() + adj
         # print('    adj hard', adj_hard)
@@ -922,7 +921,7 @@ class DGG_LearnableK(nn.Module):
         # plt.title('adj hard')
         # plt.show()
 
-        return adj_hard
+        return adj_hard, k
 
 
 class LearnableKEncoder(nn.Module):
@@ -934,7 +933,8 @@ class LearnableKEncoder(nn.Module):
         # then project down to 1
         self.k_mu = nn.Sequential(
             nn.Linear(in_dim, latent_dim),
-            # nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+            nn.Linear(latent_dim, latent_dim)
         )
         self.k_logvar = nn.Linear(in_dim, latent_dim)
         self.k_project = nn.Sequential(
@@ -956,9 +956,9 @@ class LearnableKEncoder(nn.Module):
 
     def forward(self, x):
         latent_k_mu = self.k_mu(x)
-        latent_k_logvar = self.k_logvar(x)
-        latent_k = self.latent_sample(latent_k_mu, latent_k_logvar)
-        k = self.k_project(latent_k)  # [B, N, 1]
+        # latent_k_logvar = self.k_logvar(x)
+        # latent_k = self.latent_sample(latent_k_mu, latent_k_logvar)
+        k = self.k_project(latent_k_mu)  # [B, N, 1]
 
         return k
 
