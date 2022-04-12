@@ -797,6 +797,12 @@ class DGG_LearnableK(nn.Module):
             nn.Linear(latent_dim, 1),
         )
 
+        self.adj_project = nn.Sequential(
+            nn.Linear(adj_dim, 3),
+            nn.ReLU(),
+            nn.Linear(3, 1),
+        )
+
         # Learnable K
         self.register_buffer("k_bias", torch.tensor(k_bias))
 
@@ -807,7 +813,7 @@ class DGG_LearnableK(nn.Module):
             in_dim=latent_dim, latent_dim=latent_dim
         )
 
-    def forward(self, x, in_adj, temp, noise=True):
+    def forward(self, x, in_adj, temp, noise=True, writer=None, epoch=None):
         """
 
         Args:
@@ -822,71 +828,27 @@ class DGG_LearnableK(nn.Module):
         # get number of nodes
         N = x.shape[-2]
 
-        # embed input and adjacency to get initial edge probabilities
-        u = x[in_adj.indices()[0, :]]                   # [n, dim]
-        v = x[in_adj.indices()[1, :]]                   # [n, dim]
-        auv = in_adj.values().unsqueeze(-1)             # [n, 1]
-        u_v_auv = torch.concat([u, v, auv], dim=-1)     # [n, dim + dim + 1]
-        z = self.input_adj_project(u_v_auv).flatten()   # [n]
-        z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
-        log_prob = torch.sparse.log_softmax(z_matrix, dim=1)    # [N, N]
+        # embed input and adjacency to get initial edge log probabilities
+        edge_p = self.edge_prob_net(in_adj, x, bypass='project_adj')               # [N, N]
+        return edge_p.to_dense().unsqueeze(0)  # step 0
 
-        # --------- NOW INCLUDES BATCH DIMENSION -------- #
+        log_p = torch.sparse.log_softmax(edge_p, dim=1)  # [N, N]
+
         # prepare input features and log probs for rest of function
         x = x.unsqueeze(0)                          # [1, N, dim]
-        log_p = log_prob.to_dense().unsqueeze(0)    # [1, N, N]
+        log_p = log_p.to_dense().unsqueeze(0)       # [1, N, N]
 
-        if noise:
-            # During training sample from Gumbel Softmax [B, N, N]
-            edge_log_p = torch.stack(
-                [
-                    gumbel_softmax_sample(batch, temp, self.self_loops_noise)
-                    for batch in log_p
-                ]
-            )
-        else:
-            edge_log_p = log_p
+        # add gumbel noise to edge log probabilities
+        log_p = self.perturb_edge_prob(log_p, noise, temp)
 
         # Sort edge probabilities in ASCENDING order
-        sorted, idxs = torch.sort(edge_log_p, dim=-1, descending=False)
-        # print('     edge prob', edge_prob)
-        # print('     sorted', sorted)
+        sorted_log_p, idxs = torch.sort(log_p, dim=-1, descending=False)
 
         # Get smooth top-k
-        in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1) # [N, 1, 1]
-        degree = self.input_degree_project(in_degree)           # [1, N, dim]
-        x_proj = self.input_project(x)                          # [1, N, dim]
+        k = self.k_estimate_net(N, in_adj, x)    # [1, N, 1]
 
-        feats_for_k = torch.cat([degree, x_proj], dim=-1)       # [1, N, 2 x dim]
-        in_k_feats = self.combine_input_degree(feats_for_k)
-
-        # use projected input to get k
-        k = self.k_net(in_k_feats)  # [B, N, 1]
-
-        # Keep k between -1 and 1
-        # k = torch.tanh(k)
-        # print('    k', k.mean())
-
-        # Calculate first_k
-        t = torch.arange(N).reshape(1, 1, -1).cuda()    # base domain
-        t = (t / N) * 2 - 1                             # squeeze to [-1, 1]
-        w = 0.5                                         # sharpness parameter
-        first_k = 0.5 * (1 + torch.tanh((t + k) / w))   # higher k = more items closer to 1
-        # print('    first k', first_k)
-
-        # Multiply sorted edge log probabilities by first-k and then softmax
-        first_k_log_prob = sorted * first_k
-        first_k_prob = torch.softmax(first_k_log_prob / temp, dim=-1)
-        # print('    first k prob', first_k_prob)
-
-        # Unsort
-        adj = first_k_prob.clone().scatter_(dim=-1, index=idxs, src=first_k_prob)
-        # print('    adj', adj)
-
-        # check adjacency argmax equals edge_prob argmax
-        # print(
-        #     torch.all(torch.argmax(adj, dim=-1) == torch.argmax(edge_prob, dim=-1))
-        # )
+        # select top_k
+        adj, top_k = self.select_top_k(N, idxs, k, sorted_log_p, temp)
 
         if not self.hard:
             # return adjacency matrix with softmax probabilities
@@ -894,10 +856,8 @@ class DGG_LearnableK(nn.Module):
 
         # if hard adj desired, threshold first_k and scatter
         adj_hard = torch.ones_like(adj)
-        adj_hard.scatter_(dim=-1, index=idxs, src=(first_k > 0.8).float())
-        # print('    adj hard', adj_hard)
+        adj_hard.scatter_(dim=-1, index=idxs, src=(top_k > 0.8).float())
         adj_hard = (adj_hard - adj).detach() + adj
-        # print('    adj hard', adj_hard)
 
         assert torch.any(torch.isnan(adj_hard)) == False
         assert torch.any(torch.isinf(adj_hard)) == False
@@ -922,6 +882,68 @@ class DGG_LearnableK(nn.Module):
         # plt.show()
 
         return adj_hard, k
+
+    def select_top_k(self, N, idxs, k, sorted_log_p, temp):
+        t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
+        t = (t / N) * 2 - 1  # squeeze to [-1, 1]
+        w = 0.001  # sharpness parameter
+        first_k = (1 + torch.tanh((t + k) / w))  # higher k = more items closer to 1
+        # print('    first k', first_k)
+        # Multiply sorted edge log probabilities by first-k and then softmax
+        first_k_log_prob = sorted_log_p * first_k
+        first_k_prob = torch.softmax(first_k_log_prob / temp, dim=-1)
+        # print('    first k prob', first_k_prob)
+        # Unsort
+        adj = first_k_prob.clone().scatter_(dim=-1, index=idxs, src=first_k_prob)
+        return adj, first_k
+
+    def k_estimate_net(self, N, in_adj, x):
+        in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+        # k = (in_degree / N) * 2 - 1
+        degree = self.input_degree_project(in_degree)  # [1, N, dim]
+        x_proj = self.input_project(x)  # [1, N, dim]
+        feats_for_k = torch.cat([degree, x_proj], dim=-1)  # [1, N, 2 x dim]
+        in_k_feats = self.combine_input_degree(feats_for_k)
+
+        # use projected input to get k
+        k = self.k_net(in_k_feats)  # [B, N, 1]
+        # # Keep k between -1 and 1
+        # k = torch.tanh(k)
+        return k
+
+    def perturb_edge_prob(self, log_p, noise, temp):
+        if noise:
+            # During training sample from Gumbel Softmax [B, N, N]
+            edge_log_p = torch.stack(
+                [
+                    gumbel_softmax_sample(batch, temp, self.self_loops_noise)
+                    for batch in log_p
+                ]
+            )
+        else:
+            edge_log_p = log_p
+        return edge_log_p
+
+    def edge_prob_net(self, in_adj, x, bypass=None):
+        if bypass is None:
+            u = x[in_adj.indices()[0, :]]  # [n, dim]
+            v = x[in_adj.indices()[1, :]]  # [n, dim]
+            auv = in_adj.values().unsqueeze(-1)  # [n, 1]
+            u_v_auv = torch.concat([u, v, auv], dim=-1)  # [n, dim + dim + 1]
+            z = self.input_adj_project(u_v_auv).flatten()  # [n]
+            z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
+            return z_matrix
+        elif bypass == 'pass':
+            # for debugging purposes
+            z_matrix = torch.sparse.FloatTensor(
+                in_adj.indices(), in_adj.values(), in_adj.shape
+            )
+            return z_matrix
+        elif bypass == 'project_adj':
+            auv = in_adj.values().unsqueeze(-1)  # [n, 1]
+            z = self.adj_project(auv).flatten()  # [n]
+            z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
+            return z_matrix
 
 
 class LearnableKEncoder(nn.Module):

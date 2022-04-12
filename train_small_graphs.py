@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_cora_dgg_denoising_degree_aware_softmax_first_k", help="experiment name"
+    "--expname", type=str, default="debug_cora_step0_004", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(

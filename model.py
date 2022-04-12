@@ -169,14 +169,17 @@ class GCNII_DGG(nn.Module):
 
             # learn structure and get adjacency matrix
             if i < len(self.dggs):
-                adj, k = self.dggs[i](
+                adj = self.dggs[i](
                     x=layer_inner, in_adj=adj,
-                    temp=self.dgm_temp, noise=self.training
+                    temp=self.dgm_temp, noise=False, writer=writer, epoch=epoch
                 )
                 adj = adj.squeeze(0)
-                if writer is not None:
-                    writer.add_histogram('train/our_node_degree', (adj > 0.5).float().sum(-1), epoch)
-                    writer.add_histogram('train/k', k.flatten(), epoch)
+                # if writer is not None:
+                #     writer.add_histogram(
+                #         'train/our_node_degree',
+                #         (adj > 0.5).float().sum(-1), epoch
+                #     )
+                #     writer.add_histogram('train/k', k.flatten(), epoch)
 
                 adj = torch_normalized_adjacency(adj)
                 # adj = adj.to_sparse()
