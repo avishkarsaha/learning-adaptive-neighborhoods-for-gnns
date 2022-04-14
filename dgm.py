@@ -759,9 +759,7 @@ class DGG_LearnableK(nn.Module):
 
         # Option 3, use projected input to get mu, var in latent dim and
         # then project down to 1
-        self.k_net = LearnableKEncoder(
-            in_dim=latent_dim, latent_dim=latent_dim
-        )
+        self.k_net = LearnableKEncoder(in_dim=3, latent_dim=3)
 
         self.gumbel = torch.distributions.Gumbel(
             loc=torch.tensor(0.0), scale=torch.tensor(0.3)
@@ -795,20 +793,33 @@ class DGG_LearnableK(nn.Module):
         edge_p = edge_p + 1e-8
         log_p = torch.log(edge_p)    # [1, N, N]
         gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
-        pert_log_p = self.perturb_edge_prob(log_p, noise_sample=gumbel_noise, noise=False)
+        noise_mode = 'non_edges'
+        if noise_mode == 'non_edges':
+            # only keep noise on non edges
+            mask = 1 - in_adj.to_dense()
+            gumbel_noise = gumbel_noise * mask
+            gumbel_noise = torch.clamp(gumbel_noise, max=0.5)
+        elif noise_mode == 'positive':
+            gumbel_noise = torch.clamp(gumbel_noise, min=0, max=1)
+
+        pert_log_p = self.perturb_edge_prob(
+            log_p, noise_sample=gumbel_noise, noise=self.training
+        )
         pert_edge_p = torch.exp(pert_log_p)
         # return pert_edge_p   # STEP 1
 
         # get smooth top-k
         k, log_k = self.k_estimate_net(
-            N, in_adj, x, mode='project_normalized_degree'
+            N, in_adj, x, mode='learn_normalized_degree'
         )    # [1, N, 1]
         if writer is not None:
             writer.add_scalar('values/k_std', log_k.std(), epoch)
             writer.add_scalar('values/k_mean', log_k.mean(), epoch)
 
         # select top_k
-        topk_edge_p, top_k = self.select_top_k(N, k, pert_edge_p, mode='k_only')
+        topk_edge_p, top_k = self.select_top_k(
+            N, k, pert_edge_p, mode='k_only', writer=writer, epoch=epoch
+        )
 
         if writer is not None:
             writer.add_scalar('values/first_k_std', top_k.sum(-1).std(), epoch)
@@ -847,15 +858,20 @@ class DGG_LearnableK(nn.Module):
 
         return adj_hard, k
 
-    def select_top_k(self, N, k, pert_edge_p, mode='k_times_edge_prob'):
+    def select_top_k(
+            self, N, k, pert_edge_p, mode='k_times_edge_prob',
+            writer=None, epoch=None
+    ):
         if mode == 'k_times_edge_prob':
-            # sort edge probabilities in ASCENDING order
-            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=False)
+            # sort edge probabilities in DESCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+            if writer is not None:
+                writer.add_scalar('values/edge_p_std', s_edge_p.sum(-1).std(), epoch)
+                writer.add_scalar('values/edge_p_mean', s_edge_p.sum(-1).mean(), epoch)
 
             t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
-            t = (t / N) * 2 - 1  # squeeze to [-1, 1]
-            w = 0.001  # sharpness parameter
-            first_k = (1 + torch.tanh((t + k) / w))  # higher k = more items closer to 1
+            w = 1  # sharpness parameter
+            first_k = 1 - 0.5 * (1 + torch.tanh((t - k) / w))  # higher k = more items closer to 1
 
             # Multiply sorted edge log probabilities by first-k and then softmax
             first_k_log_p = s_edge_p * first_k
@@ -900,11 +916,6 @@ class DGG_LearnableK(nn.Module):
             degree = self.input_degree_project(in_degree)  # [1, N, dim]
             degree = self.input_degree_decode(degree)  # [1, N, 1]
             log_k = degree
-
-            # k = torch.exp(log_k)
-
-            # Keep k between -1 and 1
-            # k = torch.tanh(k)
             return log_k, degree
         elif mode == 'fixed':
             k = torch.ones_like(in_adj.to_dense().sum(-1).reshape(1, -1, 1)) * 0
@@ -924,8 +935,22 @@ class DGG_LearnableK(nn.Module):
             unnorm_deg = (deg * var) + mu
 
             return unnorm_deg, unnorm_deg
+        elif mode == 'learn_normalized_degree':
+            in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
-    def perturb_edge_prob(self, log_p, noise_sample, noise):
+            mu = 3.899
+            var = 5.288
+            norm_deg = (in_deg - mu) / var
+
+            deg = self.input_degree_project(norm_deg)  # [1, N, dim]
+            deg = self.k_net(deg)  # [1, N, 1]
+
+            # return to original domain
+            unnorm_deg = (deg * var) + mu
+
+            return unnorm_deg, unnorm_deg
+
+    def perturb_edge_prob(self, log_p, noise_sample, noise, mode='everywhere'):
         if noise:
             # During training sample from Gumbel Softmax [B, N, N]
             edge_log_p = gumbel_sample(log_p, noise_sample)
@@ -964,35 +989,25 @@ class LearnableKEncoder(nn.Module):
         self.learn_k_bias = learn_k_bias
         # Option 1, use input to get mu, var in latent dim and
         # then project down to 1
-        self.k_mu = nn.Sequential(
-            nn.Linear(in_dim, latent_dim),
-            nn.ReLU(inplace=True),
-            nn.Linear(latent_dim, latent_dim)
-        )
+        self.k_mu = nn.Linear(in_dim, latent_dim)
         self.k_logvar = nn.Linear(in_dim, latent_dim)
-        self.k_project = nn.Sequential(
-            nn.Linear(latent_dim, 1),
-            # nn.ReLU(inplace=True)  # want k to be positive
-        )
+        self.k_project = nn.Linear(latent_dim, 1)
 
     def latent_sample(self, mu, logvar):
-        if self.training:  # TODO: change from inplace operations to normal
+        if self.training:
             # the reparameterization trick
             std = logvar.mul(0.5).exp_()
             eps = torch.empty_like(std).normal_()
             return eps.mul(std).add_(mu)
         else:
             # return mu
-            std = logvar.mul(0.5).exp_()
-            eps = torch.empty_like(std).normal_()
-            return eps.mul(std).add_(mu)
+            return mu
 
     def forward(self, x):
         latent_k_mu = self.k_mu(x)
         latent_k_logvar = self.k_logvar(x)
         latent_k = self.latent_sample(latent_k_mu, latent_k_logvar)
-        k = self.k_project(latent_k_mu)  # [B, N, 1]
-
+        k = self.k_project(latent_k)  # [B, N, 1]
         return k
 
 

@@ -171,6 +171,7 @@ class GCNII_DGG(nn.Module):
 
         mode='self_loops_present'
         if mode == 'self_loops_present':
+            # add self loops
             adj = (
                     adj.to_dense() + torch.eye(adj.shape[0], device=adj.device)
             ).to_sparse()

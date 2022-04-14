@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_cora_step3_006", help="experiment name"
+    "--expname", type=str, default="debug_cora_step4_009", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
