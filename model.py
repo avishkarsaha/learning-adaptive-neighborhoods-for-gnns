@@ -162,8 +162,18 @@ class GCNII_DGG(nn.Module):
 
         x = F.dropout(x, self.dropout, training=self.training)
         layer_inner = self.act_fn(self.fcs[0](x))
-
+        if writer is not None:
+            writer.add_histogram(
+                'train/layer_inner_val',
+                layer_inner.mean(), epoch
+            )
         _layers.append(layer_inner)
+
+        mode='self_loops_present'
+        if mode == 'self_loops_present':
+            adj = (
+                    adj.to_dense() + torch.eye(adj.shape[0], device=adj.device)
+            ).to_sparse()
 
         for i, con in enumerate(self.convs):
 
@@ -181,7 +191,7 @@ class GCNII_DGG(nn.Module):
                 #     )
                 #     writer.add_histogram('train/k', k.flatten(), epoch)
 
-                adj = torch_normalized_adjacency(adj)
+                adj = torch_normalized_adjacency(adj, mode='self_loops_present')
                 # adj = adj.to_sparse()
                 # print('adj', adj.sum(-1).mean().item(), adj.sum(-1).max().item(), adj.sum(-1).mean().item())
 

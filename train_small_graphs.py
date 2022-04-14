@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_cora_step0_004", help="experiment name"
+    "--expname", type=str, default="debug_cora_step3_006", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -195,8 +195,20 @@ def train_debug(
     loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
     loss_train.backward()
 
-    # for name, p in model.named_parameters():
-    #     print(name, p.grad.max().item(),  p.grad.mean().item(), p.grad.min().item())
+
+    # k_net_grads =  torch.cat(
+    #     [p.grad.flatten() for name, p in model.dggs.named_parameters()
+    #      if 'input_degree' in name and p.grad is not None]
+    # ).flatten()
+    # convs_grads = torch.cat(
+    #     [p.grad.flatten() for name, p in model.fcs[0].named_parameters()
+    #      if p.grad is not None]
+    # ).flatten()
+    # # writer.add_histogram('train/in_deg_grad', k_net_grads, epoch)
+    # writer.add_histogram('train/fcs_grad', convs_grads, epoch)
+
+    # print('k grad', float(k_net_grads.mean()))
+    # print('fcs grad', float(convs_grads.mean()))
 
     # if args.grad_clip != -1:
     #     torch.nn.utils.clip_grad_norm_(
@@ -333,9 +345,9 @@ if __name__ == "__main__":
             best = loss_val
             best_epoch = epoch
             acc = acc_val
-            save_checkpoint(
-                checkpt_file, args, epoch, model, optimizer, lr_scheduler="None"
-            )
+            # save_checkpoint(
+            #     checkpt_file, args, epoch, model, optimizer, lr_scheduler="None"
+            # )
             bad_counter = 0
         else:
             bad_counter += 1

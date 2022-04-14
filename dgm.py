@@ -8,78 +8,29 @@ import torch.nn.functional as F
 import matplotlib
 
 
-def sample_gumbel(shape, eps=1e-20):
+def sample_gumbel_from_uniform(shape, eps=1e-20):
     """Sample from Gumbel(0, 1)"""
     U = torch.rand(shape)
     if torch.cuda.is_available():
         U = U.cuda()
     return -torch.log(-torch.log(U + eps) + eps)
 
-
-def gumbel_softmax_sample(logits, temperature, self_loops_noise=False):
+def gumbel_sample(logits, noise_sample):
     """Draw a sample from the Gumbel-Softmax distribution
     Args:
         logits: input log probabilities of size [N, N]
     """
+    assert logits.shape == noise_sample.shape
 
-    if self_loops_noise:
-        # Whether to add noise along diagonal of logits (self loop indices)
-        noise = sample_gumbel(logits.size())
-    else:
-        # If no noise added to self loops then zero out those indices
-        zero_self_loops = 1 - torch.eye(n=logits.shape[0])
+    # No noise added to self loops so zero out those indices
+    zero_self_loops = 1 - torch.eye(n=logits.shape[0])
 
-        if torch.cuda.is_available():
-            zero_self_loops = zero_self_loops.cuda()
+    if torch.cuda.is_available():
+        zero_self_loops = zero_self_loops.cuda()
 
-        noise = sample_gumbel(logits.size()) * zero_self_loops
-
-    y = logits + noise
-    # y = F.softmax(y / temperature, dim=-1)
+    noise = noise_sample * zero_self_loops
+    y = logits + noise_sample
     return y
-
-
-def gumbel_sample(logits, self_loops_noise=False):
-    """Perturb sample with gumbel noise
-    Args:
-        logits: input log probabilities of size [N, N]
-    """
-
-    if self_loops_noise:
-        # Whether to add noise across all logits including self loop indices (diagonal)
-        noise = sample_gumbel(logits.size())
-    else:
-        # If no noise added to self loops then zero out those indices
-        zero_self_loops = 1 - torch.eye(n=logits.shape[0])
-
-        if torch.cuda.is_available():
-            zero_self_loops = zero_self_loops.cuda()
-
-        noise = sample_gumbel(logits.size()) * zero_self_loops
-
-    y = logits + noise
-    return y
-
-
-def gumbel_perturb(logits, self_loops_noise=False, noise=True):
-    """
-      Sample from the Gumbel-Softmax distribution
-    Args:
-      logits: [batch_size, n_class] unnormalized log-probs
-      self_loops_noise: if True, add noise to self-loop indices
-    Returns:
-      [batch_size, n_class] sample from the Gumbel-Softmax distribution.
-    """
-
-    if noise:
-        # During training add noise
-        y = gumbel_sample(logits, self_loops_noise)
-    else:
-        # During inference no noise
-        y = y
-
-    return y
-
 
 def straight_through_gumbel_softmax(
     logits, temperature, hard=False, self_loops_noise=False
@@ -95,7 +46,7 @@ def straight_through_gumbel_softmax(
       If hard=True, then the returned sample will be one-hot, otherwise it will
       be a probabilitiy distribution that sums to 1 across classes
     """
-    y = gumbel_softmax_sample(logits, temperature, self_loops_noise)
+    y = gumbel_sample(logits, temperature, self_loops_noise)
 
     if not hard:
         # return y.view(-1, latent_dim * categorical_dim)
@@ -129,7 +80,7 @@ def straight_through_gumbel_softmax_top_k(
     """
     if noise:
         # During training add noise
-        y = gumbel_softmax_sample(logits, temperature, self_loops_noise)
+        y = gumbel_sample(logits, temperature, self_loops_noise)
     else:
         # During inference no noise
         y = F.softmax(logits / temperature, dim=-1)
@@ -345,7 +296,7 @@ class DGG_LearnableK_SDD(nn.Module):
             # During training sample from Gumbel Softmax [B, N, N]
             edge_prob = torch.stack(
                 [
-                    gumbel_softmax_sample(batch, temp, self.self_loops_noise)
+                    gumbel_sample(batch, temp, self.self_loops_noise)
                     for batch in log_p
                 ]
             )
@@ -521,7 +472,7 @@ class DGG_LearnableK_Small(nn.Module):
             # During training sample from Gumbel Softmax [B, N, N]
             edge_prob = torch.stack(
                 [
-                    gumbel_softmax_sample(batch, temp, self.self_loops_noise)
+                    gumbel_sample(batch, temp, self.self_loops_noise)
                     for batch in log_p
                 ]
             )
@@ -685,7 +636,7 @@ class DGG_LearnableK_old(nn.Module):
             # During training sample from Gumbel Softmax [B, N, N]
             edge_prob = torch.stack(
                 [
-                    gumbel_softmax_sample(batch, temp, self.self_loops_noise)
+                    gumbel_sample(batch, temp, self.self_loops_noise)
                     for batch in log_p
                 ]
             )
@@ -782,14 +733,13 @@ class DGG_LearnableK(nn.Module):
             nn.Linear(in_dim, latent_dim),
             nn.LeakyReLU(),
         )
-        self.input_degree_project = nn.Sequential(
-            nn.Linear(1, latent_dim),
-            nn.LeakyReLU(),
-        )
+        self.input_degree_project = nn.Linear(1, 3, bias=True)
+        self.input_degree_decode = nn.Linear(3, 1, bias=True)
         self.combine_input_degree = nn.Sequential(
-            nn.Linear(2 * latent_dim, latent_dim),
+            nn.Linear(latent_dim + 3, latent_dim),
             nn.LeakyReLU(),
         )
+        self.degree_bias = nn.Parameter(torch.ones(1) * -1)
 
         self.input_adj_project = nn.Sequential(
             nn.Linear(in_dim * 2 + adj_dim, latent_dim),
@@ -813,6 +763,10 @@ class DGG_LearnableK(nn.Module):
             in_dim=latent_dim, latent_dim=latent_dim
         )
 
+        self.gumbel = torch.distributions.Gumbel(
+            loc=torch.tensor(0.0), scale=torch.tensor(0.3)
+        )
+
     def forward(self, x, in_adj, temp, noise=True, writer=None, epoch=None):
         """
 
@@ -828,31 +782,41 @@ class DGG_LearnableK(nn.Module):
         # get number of nodes
         N = x.shape[-2]
 
+        # prepare input featuresfor rest of function
+        x = x.unsqueeze(0)  # [1, N, dim]
+
         # embed input and adjacency to get initial edge log probabilities
-        edge_p = self.edge_prob_net(in_adj, x, bypass='project_adj')               # [N, N]
-        return edge_p.to_dense().unsqueeze(0)  # step 0
-
-        log_p = torch.sparse.log_softmax(edge_p, dim=1)  # [N, N]
-
-        # prepare input features and log probs for rest of function
-        x = x.unsqueeze(0)                          # [1, N, dim]
-        log_p = log_p.to_dense().unsqueeze(0)       # [1, N, N]
+        edge_p = self.edge_prob_net(in_adj, x, mode='project_adj')    # [N, N]
+        edge_p = edge_p.to_dense().unsqueeze(0)                         # [1, N, N]
+        edge_p = F.relu(edge_p)     # keep edge probabilities positive
+        # return edge_p   # STEP 0
 
         # add gumbel noise to edge log probabilities
-        log_p = self.perturb_edge_prob(log_p, noise, temp)
+        edge_p = edge_p + 1e-8
+        log_p = torch.log(edge_p)    # [1, N, N]
+        gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
+        pert_log_p = self.perturb_edge_prob(log_p, noise_sample=gumbel_noise, noise=False)
+        pert_edge_p = torch.exp(pert_log_p)
+        # return pert_edge_p   # STEP 1
 
-        # Sort edge probabilities in ASCENDING order
-        sorted_log_p, idxs = torch.sort(log_p, dim=-1, descending=False)
-
-        # Get smooth top-k
-        k = self.k_estimate_net(N, in_adj, x)    # [1, N, 1]
+        # get smooth top-k
+        k, log_k = self.k_estimate_net(
+            N, in_adj, x, mode='project_normalized_degree'
+        )    # [1, N, 1]
+        if writer is not None:
+            writer.add_scalar('values/k_std', log_k.std(), epoch)
+            writer.add_scalar('values/k_mean', log_k.mean(), epoch)
 
         # select top_k
-        adj, top_k = self.select_top_k(N, idxs, k, sorted_log_p, temp)
+        topk_edge_p, top_k = self.select_top_k(N, k, pert_edge_p, mode='k_only')
+
+        if writer is not None:
+            writer.add_scalar('values/first_k_std', top_k.sum(-1).std(), epoch)
+            writer.add_scalar('values/first_k_mean', top_k.sum(-1).mean(), epoch)
 
         if not self.hard:
             # return adjacency matrix with softmax probabilities
-            return adj, k
+            return topk_edge_p
 
         # if hard adj desired, threshold first_k and scatter
         adj_hard = torch.ones_like(adj)
@@ -883,49 +847,94 @@ class DGG_LearnableK(nn.Module):
 
         return adj_hard, k
 
-    def select_top_k(self, N, idxs, k, sorted_log_p, temp):
-        t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
-        t = (t / N) * 2 - 1  # squeeze to [-1, 1]
-        w = 0.001  # sharpness parameter
-        first_k = (1 + torch.tanh((t + k) / w))  # higher k = more items closer to 1
-        # print('    first k', first_k)
-        # Multiply sorted edge log probabilities by first-k and then softmax
-        first_k_log_prob = sorted_log_p * first_k
-        first_k_prob = torch.softmax(first_k_log_prob / temp, dim=-1)
-        # print('    first k prob', first_k_prob)
-        # Unsort
-        adj = first_k_prob.clone().scatter_(dim=-1, index=idxs, src=first_k_prob)
-        return adj, first_k
+    def select_top_k(self, N, k, pert_edge_p, mode='k_times_edge_prob'):
+        if mode == 'k_times_edge_prob':
+            # sort edge probabilities in ASCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=False)
 
-    def k_estimate_net(self, N, in_adj, x):
-        in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
-        # k = (in_degree / N) * 2 - 1
-        degree = self.input_degree_project(in_degree)  # [1, N, dim]
-        x_proj = self.input_project(x)  # [1, N, dim]
-        feats_for_k = torch.cat([degree, x_proj], dim=-1)  # [1, N, 2 x dim]
-        in_k_feats = self.combine_input_degree(feats_for_k)
+            t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
+            t = (t / N) * 2 - 1  # squeeze to [-1, 1]
+            w = 0.001  # sharpness parameter
+            first_k = (1 + torch.tanh((t + k) / w))  # higher k = more items closer to 1
 
-        # use projected input to get k
-        k = self.k_net(in_k_feats)  # [B, N, 1]
-        # # Keep k between -1 and 1
-        # k = torch.tanh(k)
-        return k
+            # Multiply sorted edge log probabilities by first-k and then softmax
+            first_k_log_p = s_edge_p * first_k
 
-    def perturb_edge_prob(self, log_p, noise, temp):
+            # Unsort
+            adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+            return adj, first_k
+        elif mode == 'k_only':
+            # sort edge probabilities in DESCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+
+            t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
+            w = 1  # sharpness parameter
+            first_k = 1 - 0.5 * (1 + torch.tanh((t - k) / w))  # higher k = more items closer to 1
+
+            # Unsort
+            adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
+            return adj, first_k
+
+    def k_estimate_net(self, N, in_adj, x, mode='calculate'):
+        if mode == 'calculate':
+            in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+            k = (in_degree / N) * 2 - 1
+        elif mode == 'learn':
+            in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+            degree = F.leaky_relu(self.input_degree_project(in_degree))  # [1, N, dim]
+
+            x_proj = self.input_project(x)  # [1, N, dim]
+            feats_for_k = torch.cat([degree, x_proj], dim=-1)  # [1, N, 2 x dim]
+
+            in_k_feats = self.combine_input_degree(feats_for_k)
+
+            # use projected input to get k
+            log_k = self.k_net(in_k_feats)  # [B, N, 1]
+            og_k = torch.exp(log_k)
+
+            # Keep k between -1 and 1
+            k = torch.tanh(log_k)
+        elif mode == 'project_degree':
+            in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+            in_degree = (in_degree / N) * 2 - 1
+            degree = self.input_degree_project(in_degree)  # [1, N, dim]
+            degree = self.input_degree_decode(degree)  # [1, N, 1]
+            log_k = degree
+
+            # k = torch.exp(log_k)
+
+            # Keep k between -1 and 1
+            # k = torch.tanh(k)
+            return log_k, degree
+        elif mode == 'fixed':
+            k = torch.ones_like(in_adj.to_dense().sum(-1).reshape(1, -1, 1)) * 0
+            k = (k / N) * 2 - 1
+            return k, k
+        elif mode == 'project_normalized_degree':
+            in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+
+            mu = 3.899
+            var = 5.288
+            norm_deg = (in_deg - mu) / var
+
+            deg = self.input_degree_project(norm_deg)  # [1, N, dim]
+            deg = self.input_degree_decode(deg)  # [1, N, 1]
+
+            # return to original domain
+            unnorm_deg = (deg * var) + mu
+
+            return unnorm_deg, unnorm_deg
+
+    def perturb_edge_prob(self, log_p, noise_sample, noise):
         if noise:
             # During training sample from Gumbel Softmax [B, N, N]
-            edge_log_p = torch.stack(
-                [
-                    gumbel_softmax_sample(batch, temp, self.self_loops_noise)
-                    for batch in log_p
-                ]
-            )
+            edge_log_p = gumbel_sample(log_p, noise_sample)
         else:
             edge_log_p = log_p
         return edge_log_p
 
-    def edge_prob_net(self, in_adj, x, bypass=None):
-        if bypass is None:
+    def edge_prob_net(self, in_adj, x, mode=None):
+        if mode is None:
             u = x[in_adj.indices()[0, :]]  # [n, dim]
             v = x[in_adj.indices()[1, :]]  # [n, dim]
             auv = in_adj.values().unsqueeze(-1)  # [n, 1]
@@ -933,17 +942,19 @@ class DGG_LearnableK(nn.Module):
             z = self.input_adj_project(u_v_auv).flatten()  # [n]
             z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z_matrix
-        elif bypass == 'pass':
+        elif mode == 'pass':
             # for debugging purposes
             z_matrix = torch.sparse.FloatTensor(
                 in_adj.indices(), in_adj.values(), in_adj.shape
             )
             return z_matrix
-        elif bypass == 'project_adj':
+        elif mode == 'project_adj':
             auv = in_adj.values().unsqueeze(-1)  # [n, 1]
             z = self.adj_project(auv).flatten()  # [n]
             z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z_matrix
+        else:
+            raise Exception('mode not found')
 
 
 class LearnableKEncoder(nn.Module):
@@ -978,8 +989,8 @@ class LearnableKEncoder(nn.Module):
 
     def forward(self, x):
         latent_k_mu = self.k_mu(x)
-        # latent_k_logvar = self.k_logvar(x)
-        # latent_k = self.latent_sample(latent_k_mu, latent_k_logvar)
+        latent_k_logvar = self.k_logvar(x)
+        latent_k = self.latent_sample(latent_k_mu, latent_k_logvar)
         k = self.k_project(latent_k_mu)  # [B, N, 1]
 
         return k
@@ -1463,14 +1474,14 @@ def tanh_test(k):
     # plt.scatter(t, x_topk_gt.detach())
     # plt.show()
 
+
 def tanh_plot(k=0, w=1):
     N = 50
     x = torch.arange(N)
-    x = (x / N) * 2 - 1
-    y = torch.tanh((x + k) / w)
+    # x = (x / N) * 2 - 1
+    y = 1 - 0.5 * (1 + torch.tanh((x - k) / w))
 
-    plt.scatter(x, 0.5 * (1 + y))
-    plt.scatter(x, torch.sigmoid(y))
+    plt.scatter(x, y)
 
 
 
@@ -1479,9 +1490,9 @@ if __name__ == "__main__":
     # tanh_test_exp(2.5)
     # tanh_test(12.2)
 
-    tanh_plot(k=0, w=0.5)
-    tanh_plot(k=0.5, w=0.5)
+    tanh_plot(k=0, w=1)
+    tanh_plot(k=5, w=1)
     # tanh_plot(k=-0.5, w=0.5)
-    tanh_plot(k=-1, w=0.5)
+    tanh_plot(k=10, w=1)
     plt.show()
 
