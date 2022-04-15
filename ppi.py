@@ -81,6 +81,7 @@ optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
 
 loss_fcn = torch.nn.BCELoss()
+
 # adapted from DGL
 def evaluate(feats, model, idx, subgraph, labels, loss_fcn):
     model.eval()

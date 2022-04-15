@@ -1,0 +1,48 @@
+step 0 - returning the input adjacency matrix and normalizing it works (85% acc.)
+       - returning a projected input_adj and node features slows down training/reduces performance (75% acc.)
+       - something needs to be changed here, check projected adj vs original adj stats
+       - applying a softmax to the projected edge probs drops acc to 45%, so the scale of values matters
+       - applying sigmoid drops accuracy to similar amount
+       - softmax and sigmoid result in a adj row sum that is uniform (all add to 1 in case of softmax), throws off adj normalizer
+       - only projecting the input adj to a latent dim of 3  works (85% acc)
+       - keeping the adj before normalisation in the range [0, 0.5] works (85% acc)
+step 1 - returning the exponential of the log edge probs works obvs (85% acc)
+       - adding noise to log edge prob reduces accuracy because scale of noise was too large (60% acc)
+       - adding gumbel noise (loc=0, scale=0.3) brings accuracy back up (83% acc)
+step 2 - learning k for original input adjacency works (85% acc)
+       - learning k for projected input adjancency works (85% acc)
+       - learning k with noise at train for same as above works (85% acc)
+       - learning k with noise at train and test for same as above works (85% acc)
+       - this is because it is cheating, the k value stays around 0 and this works because the adjacency
+         degree is much less than this. if there was a lot of noise and th enode degree had to be less
+         than half the total number of nodes (or very small) then this k of 0 would drop accuracy.
+       - the k stays around 0 regardless of whats happening around it --- it isnt learning the actual node degree.
+       - gradients to k_net might be too small.
+       - keeping k fixed at 2 reduces acc (81% acc)
+       - keeping k fixed at 1 reduces acc further (80% acc) 
+       - k at 0 acc is about same (80% acc) WHY?
+       - actually low fixed low values of k mostly slow down training a little instead of decreasing
+         accuracy much.
+step 3 - what happens if the selection mechanism fills the adjacency with the first k only,
+         without multiplying by the edge porbabilities, model doesnt learn really (20% acc)
+       - maybe k should be predicted in log space as we need high degree of control over small changes
+       - taking degree from original space [0,N], normalising to [-1,1,], predicting k here and then
+         unormalising back to [0,N] to get first k brings accuracy up (82% acc)
+next steps
+       - step4_000: bringing back noise to edge probs (loc=0,scale=0.3) increases acc (85.7% acc)
+       - step4_001: increasing noise (loc=0,scale=0.5) doesnt increase acc further (85% acc)
+       - noise (loc=0,scale=1) stays same as above
+       - step4_002: noise (loc=0,scale=2) reduces acc (76% acc)
+       - step4_003: learning distribution over k with noise at test time too reduces acc from 85% (80% acc)
+       - step4_004: removing k noise at test increases acc (86.3% acc)
+       - step4_005: k_times_edge_prob wihtout perturbed edge probs can keep acc at 86% (86% acc),
+         but WHY is k_mean/std so much higher at around 6 instead of 3 like other runs?
+       - step4_008: adding noise to edges but using k_only reduces acc a little (80% acc),
+         maybe you only add noise to edges which arent present because you need all edges that are present,
+         adding only positive noise works (82% acc)
+       - we get best accuracy with k_only with noise, but no noise on edges (86.3% acc). WHAT DOES THIS MEAN?
+         the input adjacency only represents edges that exist, adding noise can help find important new edges, but
+         given the number of nodes, this is impossible. to find these new edges maybe we need to do
+         some clustering? deep hough voting? this will prevent us from going fully connected to get 
+         the new edge probs. clustering?
+       - increase the number of DGG layers, and so use x input when generating edge and k feats

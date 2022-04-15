@@ -713,8 +713,8 @@ class DGG_LearnableK(nn.Module):
         self_loops_noise=False,
         dist_fn="mlp",
         k_net_input="raw",
-        hs_start=2,
-        hs_end=-5,
+        degree_mean=3,
+        degree_std=5,
     ):
         super(DGG_LearnableK, self).__init__()
 
@@ -727,6 +727,8 @@ class DGG_LearnableK(nn.Module):
         self.self_loops_noise = self_loops_noise
         self.dist_fn = dist_fn
         self.k_net_input = k_net_input
+        self.deg_mean = degree_mean
+        self.deg_std = degree_std
 
         # Embedding layers
         self.input_project = nn.Sequential(
@@ -793,7 +795,8 @@ class DGG_LearnableK(nn.Module):
         edge_p = edge_p + 1e-8
         log_p = torch.log(edge_p)    # [1, N, N]
         gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
-        noise_mode = 'non_edges'
+
+        noise_mode = 'everywhere'
         if noise_mode == 'non_edges':
             # only keep noise on non edges
             mask = 1 - in_adj.to_dense()
@@ -801,9 +804,11 @@ class DGG_LearnableK(nn.Module):
             gumbel_noise = torch.clamp(gumbel_noise, max=0.5)
         elif noise_mode == 'positive':
             gumbel_noise = torch.clamp(gumbel_noise, min=0, max=1)
+        elif noise_mode == 'everywhere':
+            pass
 
         pert_log_p = self.perturb_edge_prob(
-            log_p, noise_sample=gumbel_noise, noise=self.training
+            log_p, noise_sample=gumbel_noise, noise=False
         )
         pert_edge_p = torch.exp(pert_log_p)
         # return pert_edge_p   # STEP 1
@@ -924,8 +929,10 @@ class DGG_LearnableK(nn.Module):
         elif mode == 'project_normalized_degree':
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
-            mu = 3.899
-            var = 5.288
+            # mu = 3.899
+            # var = 5.288
+            mu = self.deg_mean
+            var = self.deg_std
             norm_deg = (in_deg - mu) / var
 
             deg = self.input_degree_project(norm_deg)  # [1, N, dim]

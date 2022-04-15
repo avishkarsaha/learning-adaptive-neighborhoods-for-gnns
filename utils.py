@@ -131,7 +131,6 @@ def load_citation(dataset_str, root):
     features = torch.FloatTensor(np.array(features.todense())).float()
     labels = torch.LongTensor(labels)
     labels = torch.max(labels, dim=1)[1]
-    # adj = sparse_mx_to_torch_sparse_tensor(adj).float()
     idx_train = torch.LongTensor(idx_train)
     idx_val = torch.LongTensor(idx_val)
     idx_test = torch.LongTensor(idx_test)
@@ -423,17 +422,17 @@ def load_ppi():
     for i in range(train_adj.shape[0]):
         adj = sp.coo_matrix(train_adj[i])
         adj = adj + adj.T.multiply(adj.T > adj) - adj.multiply(adj.T > adj)
-        tmp = sys_normalized_adjacency(adj)
-        train_adj_list.append(sparse_mx_to_torch_sparse_tensor(tmp))
+        # tmp = sys_normalized_adjacency(adj)
+        train_adj_list.append(sparse_mx_to_torch_sparse_tensor(adj))
     for i in range(val_adj.shape[0]):
         adj = sp.coo_matrix(val_adj[i])
         adj = adj + adj.T.multiply(adj.T > adj) - adj.multiply(adj.T > adj)
-        tmp = sys_normalized_adjacency(adj)
-        val_adj_list.append(sparse_mx_to_torch_sparse_tensor(tmp))
+        # tmp = sys_normalized_adjacency(adj)
+        val_adj_list.append(sparse_mx_to_torch_sparse_tensor(adj))
         adj = sp.coo_matrix(test_adj[i])
         adj = adj + adj.T.multiply(adj.T > adj) - adj.multiply(adj.T > adj)
-        tmp = sys_normalized_adjacency(adj)
-        test_adj_list.append(sparse_mx_to_torch_sparse_tensor(tmp))
+        # tmp = sys_normalized_adjacency(adj)
+        test_adj_list.append(sparse_mx_to_torch_sparse_tensor(adj))
 
     train_feat = torch.FloatTensor(train_feat)
     val_feat = torch.FloatTensor(val_feat)

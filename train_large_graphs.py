@@ -14,6 +14,9 @@ import model as models
 import uuid
 from torch.utils.tensorboard import SummaryWriter
 import shutil
+import torch.utils.data as Data
+import torch.nn as nn
+from sklearn.metrics import f1_score
 
 # Training settings
 parser = argparse.ArgumentParser()
@@ -24,35 +27,32 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_cora_step5_000_nlayers64", help="experiment name"
+    "--expname", type=str, default="debug_lg", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
-    "--epochs", type=int, default=5000, help="Number of epochs to train."
+    "--epochs", type=int, default=8000, help="Number of epochs to train."
 )
-parser.add_argument("--lr", type=float, default=0.01, help="learning rate.")
+parser.add_argument("--lr", type=float, default=0.001, help="Initial learning rate.")
 parser.add_argument(
-    "--wd1", type=float, default=0.01, help="weight decay (L2 loss on parameters)."
+    "--wd", type=float, default=0, help="Weight decay (L2 loss on parameters)."
 )
+parser.add_argument("--layer", type=int, default=9, help="Number of hidden layers.")
+parser.add_argument("--hidden", type=int, default=2048, help="Number of hidden layers.")
 parser.add_argument(
-    "--wd2", type=float, default=5e-4, help="weight decay (L2 loss on parameters)."
-)
-parser.add_argument("--layer", type=int, default=64, help="Number of layers.")
-parser.add_argument("--hidden", type=int, default=64, help="hidden dimensions.")
-parser.add_argument(
-    "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
+    "--dropout", type=float, default=0.2, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="cora", help="dateset")
+parser.add_argument("--data", default="ppi", help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
-parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
-parser.add_argument("--lamda", type=float, default=0.5, help="lamda.")
+parser.add_argument("--alpha", type=float, default=0.5, help="alpha_l")
+parser.add_argument("--lamda", type=float, default=1, help="lamda.")
 parser.add_argument("--variant", type=str2bool, default=False, help="GCN* model.")
 parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
 parser.add_argument(
-    "--model", type=str, default='GCNII_DGG', help="model name"
+    "--model", type=str, default='GCNIIppi_DGG', help="model name"
 )
 # Differentiable graph generator specific
 parser.add_argument(
@@ -120,13 +120,13 @@ parser.add_argument(
 parser.add_argument(
     "--deg_mean",
     type=float,
-    default=3.899,
+    default=18.620,
     help="heaviside project points x start",
 )
 parser.add_argument(
     "--deg_std",
     type=float,
-    default=5.288,
+    default=30.848,
     help="heaviside project points x end",
 )
 parser.add_argument(
@@ -144,7 +144,7 @@ parser.add_argument(
 parser.add_argument(
     "--n_dgg_layers",
     type=int,
-    default=64,
+    default=1,
     help="number of dgg layers",
 )
 
@@ -162,27 +162,28 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
     )
 
 
-def train(args, model, optimizer, features, adj, labels, idx_train, device):
+def train(
+        args, model, optimizer, train_feat, train_adj,
+        train_labels, train_nodes, loss_fcn, device, writer
+):
     model.train()
-    optimizer.zero_grad()
-    output = model(features, adj)
-    acc_train = accuracy(output[idx_train], labels[idx_train].to(device))
-    loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
-    loss_train.backward()
-
-    # for name, p in model.dggs.named_parameters():
-    #     print(name, p.grad.max().item(),  p.grad.mean().item(), p.grad.min().item())
-
-    # if args.grad_clip != -1:
-    #     torch.nn.utils.clip_grad_norm_(
-    #         model.dggs.parameters(), max_norm=args.grad_clip
-    #     )
-    #
-    # for name, p in model.dggs.named_parameters():
-    #     print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
-
-    optimizer.step()
-    return loss_train.item(), acc_train.item()
+    loss_tra = 0
+    acc_tra = 0
+    for step, batch in enumerate(loader):
+        batch_adj = train_adj[batch[0]].to(device)
+        batch_feature = train_feat[batch[0]].to(device)
+        batch_label = train_labels[batch[0]].to(device)
+        optimizer.zero_grad()
+        output = model(batch_feature, batch_adj)
+        loss_train = loss_fcn(
+            output[: train_nodes[batch]], batch_label[: train_nodes[batch]]
+        )
+        loss_train.backward()
+        optimizer.step()
+        loss_tra += loss_train.item()
+    loss_tra /= 20
+    acc_tra /= 20
+    return loss_tra, acc_tra
 
 def train_debug(
         args, model, optimizer, features, adj, labels, idx_train,
@@ -222,32 +223,72 @@ def train_debug(
     return loss_train.item(), acc_train.item()
 
 
-def validate(model, features, adj, labels, idx_val, device):
+def validate(
+        args, model, val_feat, val_adj, val_labels, val_nodes, loss_fcn, device
+):
+    loss_val = 0
+    acc_val = 0
+    for batch in range(2):
+        batch_adj = val_adj[batch].to(device)
+        batch_feature = val_feat[batch].to(device)
+        batch_label = val_labels[batch].to(device)
+        score, val_loss = evaluate(
+            batch_feature, model, val_nodes[batch], batch_adj, batch_label, loss_fcn
+        )
+        loss_val += val_loss
+        acc_val += score
+    loss_val /= 2
+    acc_val /= 2
+    return loss_val, acc_val
+
+def test(
+    args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
+):
     model.eval()
-    with torch.no_grad():
-        output = model(features, adj)
-        loss_val = F.nll_loss(output[idx_val], labels[idx_val].to(device))
-        acc_val = accuracy(output[idx_val], labels[idx_val].to(device))
-        return loss_val.item(), acc_val.item()
+    loss_test = 0
+    acc_test = 0
+    for batch in range(2):
+        batch_adj = test_adj[batch].to(device)
+        batch_feature = test_feat[batch].to(device)
+        batch_label = test_labels[batch].to(device)
+        score, loss = evaluate(
+            batch_feature, model, test_nodes[batch], batch_adj, batch_label, loss_fcn
+        )
+        loss_test += loss
+        acc_test += score
+    acc_test /= 2
+    loss_test /= 2
+    return loss_test, acc_test
 
-
-def test(model, features, adj, labels, idx_test, device):
-    model.eval()
-    with torch.no_grad():
-        output = model(features, adj)
-        loss_val = F.nll_loss(output[idx_test], labels[idx_test].to(device))
-        acc_val = accuracy(output[idx_test], labels[idx_test].to(device))
-        return loss_val.item(), acc_val.item()
-
-
-def test_best(model, features, adj, labels, idx_test, checkpt_file, device):
+def test_best(
+    args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
+):
     model.load_state_dict(torch.load(checkpt_file)["model_state_dict"])
+    loss_test = 0
+    acc_test = 0
+    for batch in range(2):
+        batch_adj = test_adj[batch].to(device)
+        batch_feature = test_feat[batch].to(device)
+        batch_label = test_labels[batch].to(device)
+        score, loss = evaluate(
+            batch_feature, model, test_nodes[batch], batch_adj, batch_label, loss_fcn
+        )
+        loss_test += loss
+        acc_test += score
+    acc_test /= 2
+    loss_test /= 2
+    return loss_test, acc_test
+
+
+# adapted from DGL
+def evaluate(feats, model, idx, subgraph, labels, loss_fcn):
     model.eval()
     with torch.no_grad():
-        output = model(features, adj)
-        loss_test = F.nll_loss(output[idx_test], labels[idx_test].to(device))
-        acc_test = accuracy(output[idx_test], labels[idx_test].to(device))
-        return loss_test.item(), acc_test.item()
+        output = model(feats, subgraph)
+        loss_data = loss_fcn(output[:idx], labels[:idx].float())
+        predict = np.where(output[:idx].data.cpu().numpy() > 0.5, 1, 0)
+        score = f1_score(labels[:idx].data.cpu().numpy(), predict, average="micro")
+        return score, loss_data.item()
 
 
 if __name__ == "__main__":
@@ -282,57 +323,55 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
-    adj, features, labels, idx_train, idx_val, idx_test = load_citation(
-        args.data, args.root
-    )
+    train_adj, val_adj, test_adj, train_feat, val_feat, test_feat, \
+    train_labels, val_labels, test_labels, train_nodes, val_nodes, test_nodes = load_ppi()
     cudaid = "cuda"
     device = torch.device(cudaid)
-    features = features.to(device)
-    adj = adj.to(device)
+
+    idx = torch.LongTensor(range(20))
+    loader = Data.DataLoader(dataset=idx, batch_size=1, shuffle=True, num_workers=0)
 
     # Load model
     model = models.__dict__[args.model](
-        nfeat=features.shape[1],
+        nfeat=train_feat[0].shape[1],
         nlayers=args.layer,
         nhidden=args.hidden,
-        nclass=int(labels.max()) + 1,
+        nclass=train_labels[0].shape[1],
         dropout=args.dropout,
         lamda=args.lamda,
         alpha=args.alpha,
         variant=args.variant,
-        args=args
+        args=args,
     ).to(device)
+    loss_fcn = torch.nn.BCELoss()
 
-    optimizer = optim.Adam(
-        [
-            {"params": model.params1, "weight_decay": args.wd1},
-            {"params": model.params2, "weight_decay": args.wd2},
-        ],
-        lr=args.lr,
-    )
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     # Run
     t_total = time.time()
     bad_counter = 0
-    best = 999999999
     best_epoch = 0
     acc = 0
     for epoch in range(args.epochs):
-        loss_tra, acc_tra = train_debug(
-            args, model, optimizer, features, adj, labels, idx_train, device, epoch, writer
+        loss_tra, acc_tra = train(
+            args, model, optimizer, train_feat, train_adj,
+            train_labels, train_nodes, loss_fcn, device, writer
         )
-        loss_val, acc_val = validate(model, features, adj, labels, idx_val, device)
-        acc_test = test(model, features, adj, labels, idx_test, device)[1]
+        loss_val, acc_val = validate(
+            args, model, val_feat, val_adj, val_labels, val_nodes, loss_fcn, device
+        )
+        acc_test = test(
+            args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
+        )[1]
 
         if (epoch + 1) % 1 == 0:
             print(
                 "Epoch:{:04d}".format(epoch + 1),
                 "train",
                 "loss:{:.3f}".format(loss_tra),
-                "acc:{:.2f}".format(acc_tra * 100),
                 "| val",
                 "loss:{:.3f}".format(loss_val),
-                "acc:{:.2f}".format(acc_val * 100),
+                "f1:{:.3f}".format(acc_val * 100),
             )
 
             writer.add_scalar("train/loss", loss_tra, epoch)
@@ -341,8 +380,8 @@ if __name__ == "__main__":
             writer.add_scalar("val/acc", acc_val, epoch)
             writer.add_scalar("test/acc", acc_test, epoch)
 
-        if loss_val < best:
-            best = loss_val
+        if acc_val > acc:
+            acc = acc_val
             best_epoch = epoch
             acc = acc_val
             # save_checkpoint(
@@ -356,8 +395,10 @@ if __name__ == "__main__":
             break
 
     if args.test:
-        acc = test_best(model, features, adj, labels, idx_test, checkpt_file, device)[1]
+        acc = test_best(
+            args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
+        )[1]
 
     print("Train cost: {:.4f}s".format(time.time() - t_total))
     print("Load {}th epoch".format(best_epoch))
-    print("Test" if args.test else "Val", "acc.:{:.1f}".format(acc * 100))
+    print("Test" if args.test else "Val", "f1.:{:.2f}".format(acc * 100))
