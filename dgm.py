@@ -767,6 +767,10 @@ class DGG_LearnableK(nn.Module):
             loc=torch.tensor(0.0), scale=torch.tensor(0.3)
         )
 
+    def k_hook(self, grad):
+        grad = torch.clamp(grad, min=-0.05, max=0.05)
+        self.k_grad.append(grad)
+
     def forward(self, x, in_adj, temp, noise=True, writer=None, epoch=None):
         """
 
@@ -809,7 +813,7 @@ class DGG_LearnableK(nn.Module):
             pass
 
         pert_log_p = self.perturb_edge_prob(
-            log_p, noise_sample=gumbel_noise, noise=False
+            log_p, noise_sample=gumbel_noise, noise=True
         )
         pert_edge_p = torch.exp(pert_log_p)
         # return pert_edge_p   # STEP 1
@@ -822,6 +826,11 @@ class DGG_LearnableK(nn.Module):
             writer.add_scalar('values/k_std', log_k.std(), epoch)
             writer.add_scalar('values/k_mean', log_k.mean(), epoch)
 
+        # register hooks for gradients
+        if self.training:
+            self.k_grad = []
+            k_grad = k.register_hook(self.k_hook)
+            k.retain_grad()
         # select top_k
         topk_edge_p, top_k = self.select_top_k(
             N, k, pert_edge_p, mode='k_only',
@@ -906,7 +915,6 @@ class DGG_LearnableK(nn.Module):
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
             t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
-            w = 1  # sharpness parameter
             first_k = -t + k
 
             # clamp values in forward to [0, 1] without affecting backward
@@ -918,7 +926,7 @@ class DGG_LearnableK(nn.Module):
             return adj, first_k
 
         # k_only with linear gradients (instead of tanh saturating grads)
-        elif mode == 'k_k_times_edge_prob_w_linear_grad':
+        elif mode == 'k_times_edge_prob_w_linear_grad':
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
@@ -998,7 +1006,7 @@ class DGG_LearnableK(nn.Module):
 
             return unnorm_deg, unnorm_deg
 
-    def perturb_edge_prob(self, log_p, noise_sample, noise, mode='everywhere'):
+    def perturb_edge_prob(self, log_p, noise_sample, noise):
         if noise:
             # During training sample from Gumbel Softmax [B, N, N]
             edge_log_p = gumbel_sample(log_p, noise_sample)
@@ -1836,6 +1844,81 @@ def identity_grad_test_02(k=0, w=1, N=10, change=1):
 
     plt.show()
 
+def identity_grad_test_03(k=3, w=1, N=10, gt_k=8):
+    print('IDENTITY k {} w {} N {} gt_k {}'.format(k, w, N, gt_k))
+    torch.manual_seed(0)
+    k = torch.tensor(k, requires_grad=True)
+    t = torch.arange(N, requires_grad=True)
+    log_p = (torch.rand(int(N)) > 0.5).float()
+    log_p.requires_grad_(True)
+    s_log_p, idxs = torch.sort(log_p, descending=True)
+    first_k = -t + k
+    with torch.no_grad():
+        first_k[:] = torch.clamp(first_k, min=0, max=1)
+
+    gt_first_k = torch.zeros_like(first_k)
+    gt_first_k[:int(gt_k)] = 1
+    loss = (gt_first_k - first_k) ** 2
+    loss = loss.sum()
+    print('loss',loss)
+
+    t.retain_grad()
+    log_p.retain_grad()
+    s_log_p.retain_grad()
+    first_k.retain_grad()
+    k.retain_grad()
+
+    loss.backward()
+
+    # torch.nn.utils.clip_grad_value_(log_p, 1.0)
+    # torch.nn.utils.clip_grad_value_(s_log_p, 1.0)
+
+    print('k', k)
+    print('k grad', k.grad)
+    print('t', t)
+    print('t grad', t.grad)
+    print('s_log_p', s_log_p)
+    print('first k', first_k)
+    print('first k grad', first_k.grad)
+    print('\n')
+
+    fig = plt.figure(figsize=(8, 8))
+    gs = fig.add_gridspec(8, 2)
+    ax00 = fig.add_subplot(gs[0, 0])
+    ax10 = fig.add_subplot(gs[1, 0])
+    ax20 = fig.add_subplot(gs[2, 0])
+    ax21 = fig.add_subplot(gs[2, 1])
+    ax30 = fig.add_subplot(gs[3, 0])
+    ax31 = fig.add_subplot(gs[3, 1])
+    ax40 = fig.add_subplot(gs[4, 0])
+    ax41 = fig.add_subplot(gs[4, 1])
+    ax50 = fig.add_subplot(gs[5, 0])
+    ax51 = fig.add_subplot(gs[5, 1])
+    ax60 = fig.add_subplot(gs[6, 0])
+    ax61 = fig.add_subplot(gs[6, 1])
+    ax70 = fig.add_subplot(gs[7, 0])
+    ax71 = fig.add_subplot(gs[7, 1])
+
+    ax20.imshow(k.detach().numpy().reshape(1, -1))
+    ax21.imshow(k.grad.detach().numpy().reshape(1, -1))
+    ax30.imshow(t.detach().numpy().reshape(1, -1))
+    ax31.imshow(t.grad.detach().numpy().reshape(1, -1))
+    ax40.imshow(s_log_p.detach().numpy().reshape(1, -1))
+    ax50.imshow(first_k.detach().numpy().reshape(1, -1))
+    ax51.imshow(first_k.grad.detach().numpy().reshape(1, -1))
+
+    ax00.set_title('adj')
+    ax10.set_title('gt_adj')
+    ax20.set_title('k')
+    ax30.set_title('t')
+    ax40.set_title('s_log_p')
+    ax50.set_title('first_k')
+    ax60.set_title('first_k_log_p')
+    ax70.set_title('adj')
+
+    plt.show()
+
+
 
 
 if __name__ == "__main__":
@@ -1867,9 +1950,12 @@ if __name__ == "__main__":
     # tanh_grad_test_01(k=1.0, w=1, N=7.0, change=3)
     # identity_grad_test_01(k=1.0, w=1, N=7.0, change=5)
 
-    identity_grad_test_01(k=1.0, w=1, N=7.0, change=5)
-    identity_grad_test_02(k=1.0, w=1, N=7.0, change=5)
+    # identity_grad_test_01(k=1.0, w=1, N=7.0, change=5)
+    # identity_grad_test_02(k=1.0, w=1, N=7.0, change=5)
+    #
+    # identity_grad_test_01(k=6.0, w=1, N=7.0, change=5)
+    # identity_grad_test_02(k=6.0, w=1, N=7.0, change=5)
 
-    identity_grad_test_01(k=6.0, w=1, N=7.0, change=5)
-    identity_grad_test_02(k=6.0, w=1, N=7.0, change=5)
+    identity_grad_test_03(k=2.0, w=1, N=10.0, gt_k=8.0)
+    identity_grad_test_03(k=8.0, w=1, N=10.0, gt_k=2.0)
 

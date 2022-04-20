@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_cora", help="experiment name"
+    "--expname", type=str, default="debug_cora_01", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -147,6 +147,12 @@ parser.add_argument(
     default=1,
     help="number of dgg layers",
 )
+parser.add_argument(
+    "--normalize_adj",
+    type=str2bool,
+    default=False,
+    help="number of dgg layers",
+)
 
 
 def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
@@ -195,6 +201,8 @@ def train_debug(
     loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
     loss_train.backward()
 
+    writer.add_scalar('k_grad_mean', model.dggs[0].k_grad[0].mean(), epoch)
+    writer.add_scalar('k_grad_std', model.dggs[0].k_grad[0].std(), epoch)
 
     # k_net_grads =  torch.cat(
     #     [p.grad.flatten() for name, p in model.dggs.named_parameters()
@@ -283,7 +291,7 @@ if __name__ == "__main__":
 
     # Load data
     adj, features, labels, idx_train, idx_val, idx_test = load_citation(
-        args.data, args.root
+        args.data, args.root, normalize_adj=args.normalize_adj
     )
     cudaid = "cuda"
     device = torch.device(cudaid)

@@ -134,6 +134,7 @@ def load_citation(dataset_str, root, normalize_adj=False):
     idx_train = torch.LongTensor(idx_train)
     idx_val = torch.LongTensor(idx_val)
     idx_test = torch.LongTensor(idx_test)
+    # normalize adjacency if not using DGG
     if normalize_adj:
         adj = sys_normalized_adjacency(adj)
     adj = sparse_mx_to_torch_sparse_tensor(adj)
