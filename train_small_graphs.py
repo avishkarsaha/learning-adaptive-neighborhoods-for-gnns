@@ -37,7 +37,7 @@ parser.add_argument(
 parser.add_argument(
     "--wd2", type=float, default=5e-4, help="weight decay (L2 loss on parameters)."
 )
-parser.add_argument("--layer", type=int, default=1, help="Number of layers.")
+parser.add_argument("--layer", type=int, default=64, help="Number of layers.")
 parser.add_argument("--hidden", type=int, default=64, help="hidden dimensions.")
 parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
