@@ -83,7 +83,7 @@ def parse_index_file(filename):
 
 
 # adapted from tkipf/gcn
-def load_citation(dataset_str, root):
+def load_citation(dataset_str, root, normalize_adj=False):
     """
     Load Citation Networks Datasets.
     """
@@ -134,7 +134,8 @@ def load_citation(dataset_str, root):
     idx_train = torch.LongTensor(idx_train)
     idx_val = torch.LongTensor(idx_val)
     idx_test = torch.LongTensor(idx_test)
-    # adj = sys_normalized_adjacency(adj)
+    if normalize_adj:
+        adj = sys_normalized_adjacency(adj)
     adj = sparse_mx_to_torch_sparse_tensor(adj)
     return adj, features, labels, idx_train, idx_val, idx_test
 

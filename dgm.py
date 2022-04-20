@@ -786,7 +786,8 @@ class DGG_LearnableK(nn.Module):
         x = x.unsqueeze(0)  # [1, N, dim]
 
         # embed input and adjacency to get initial edge log probabilities
-        edge_p = self.edge_prob_net(in_adj, x, mode='project_adj')    # [N, N]
+        edge_p_mode = 'project_adj'
+        edge_p = self.edge_prob_net(in_adj, x, mode=edge_p_mode)    # [N, N]
         edge_p = edge_p.to_dense().unsqueeze(0)                         # [1, N, N]
         edge_p = F.relu(edge_p)     # keep edge probabilities positive
         # return edge_p   # STEP 0
@@ -823,7 +824,8 @@ class DGG_LearnableK(nn.Module):
 
         # select top_k
         topk_edge_p, top_k = self.select_top_k(
-            N, k, pert_edge_p, mode='k_only', writer=writer, epoch=epoch
+            N, k, pert_edge_p, mode='k_only',
+            writer=writer, epoch=epoch
         )
 
         if writer is not None:
@@ -870,6 +872,7 @@ class DGG_LearnableK(nn.Module):
         if mode == 'k_times_edge_prob':
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+
             if writer is not None:
                 writer.add_scalar('values/edge_p_std', s_edge_p.sum(-1).std(), epoch)
                 writer.add_scalar('values/edge_p_mean', s_edge_p.sum(-1).mean(), epoch)
@@ -884,17 +887,55 @@ class DGG_LearnableK(nn.Module):
             # Unsort
             adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
             return adj, first_k
+
         elif mode == 'k_only':
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
-            t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
+            t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
             w = 1  # sharpness parameter
             first_k = 1 - 0.5 * (1 + torch.tanh((t - k) / w))  # higher k = more items closer to 1
 
             # Unsort
             adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
             return adj, first_k
+
+        # k_only with linear gradients (instead of tanh saturating grads)
+        elif mode == 'k_only_w_linear_grad':
+            # sort edge probabilities in DESCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+
+            t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
+            w = 1  # sharpness parameter
+            first_k = -t + k
+
+            # clamp values in forward to [0, 1] without affecting backward
+            with torch.no_grad():
+                first_k[:] = torch.clamp(first_k, min=0, max=1)
+
+            # Unsort
+            adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
+            return adj, first_k
+
+        # k_only with linear gradients (instead of tanh saturating grads)
+        elif mode == 'k_k_times_edge_prob_w_linear_grad':
+            # sort edge probabilities in DESCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+
+            t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
+            w = 1  # sharpness parameter
+            first_k = -t + k
+
+            # Multiply sorted edge log probabilities by first-k and then softmax
+            first_k_log_p = s_edge_p * first_k
+
+            # clamp values in forward to [0, 1] without affecting backward
+            with torch.no_grad():
+                first_k_log_p[:] = torch.clamp(first_k_log_p, min=0, max=1)
+
+            # Unsort
+            adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+            return adj, first_k_log_p
 
     def k_estimate_net(self, N, in_adj, x, mode='calculate'):
         if mode == 'calculate':
@@ -945,8 +986,8 @@ class DGG_LearnableK(nn.Module):
         elif mode == 'learn_normalized_degree':
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
-            mu = 3.899
-            var = 5.288
+            mu = self.deg_mean
+            var = self.deg_std
             norm_deg = (in_deg - mu) / var
 
             deg = self.input_degree_project(norm_deg)  # [1, N, dim]
@@ -984,6 +1025,10 @@ class DGG_LearnableK(nn.Module):
             auv = in_adj.values().unsqueeze(-1)  # [n, 1]
             z = self.adj_project(auv).flatten()  # [n]
             z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
+            return z_matrix
+        elif mode == 'project_adj_dense':
+            auv = in_adj.unsqueeze(-1)  # [N, N, 1]
+            z_matrix = self.adj_project(auv).squeeze(-1).unsqueeze(0)  # [1, N, N]
             return z_matrix
         else:
             raise Exception('mode not found')
@@ -1506,15 +1551,325 @@ def tanh_plot(k=0, w=1):
     plt.scatter(x, y)
 
 
+def tanh_grad_test(k=0, w=1, N=10):
+    print('TANH k {} w {} N {}'.format(k, w, N))
+    torch.manual_seed(0)
+    k = torch.tensor(k, requires_grad=True)
+    t = torch.arange(N, requires_grad=True)
+    log_p = (torch.rand(int(N)) > 0.5).float()
+    log_p.requires_grad_(True)
+    s_log_p, idxs = torch.sort(log_p, descending=True)
+    first_k = 1 - 0.5 * (1 + torch.tanh((t - k) / w))
+    first_k_log_p = first_k * s_log_p
+    adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+    y = adj.sum()
+
+    t.retain_grad()
+    log_p.retain_grad()
+    s_log_p.retain_grad()
+    first_k.retain_grad()
+    first_k_log_p.retain_grad()
+    adj.retain_grad()
+    k.retain_grad()
+
+    y.backward()
+
+    print('k', k.grad)
+    print('t', t.grad)
+    print('s_log_p', s_log_p.grad)
+    print('first k', first_k.grad)
+    print('first k log p', first_k_log_p.grad)
+    print('adj', adj.grad)
+
+    plt.scatter(t.detach().numpy(), first_k_log_p.detach().numpy(),
+                    label='{}-{}-{}'.format(k, w, N))
+
+def tanh_grad_test_01(k=0, w=1, N=10, change=1):
+    print('TANH k {} w {} N {} change {}'.format(k, w, N, change))
+    torch.manual_seed(0)
+    k = torch.tensor(k, requires_grad=True)
+    t = torch.arange(N, requires_grad=True)
+    log_p = (torch.rand(int(N)) > 0.5).float()
+    log_p.requires_grad_(True)
+    s_log_p, idxs = torch.sort(log_p, descending=True)
+    first_k = 1 - 0.5 * (1 + torch.tanh((t - k) / w))
+    first_k_log_p = first_k * s_log_p
+    adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+    gt_adj = adj.clone().detach()
+    for i in range(change):
+        gt_adj[i] = (gt_adj[i] - 1).abs()
+    print(adj)
+    print(gt_adj)
+
+    loss = ((gt_adj - adj) ** 2).sum()
+    print('loss', loss)
+
+    t.retain_grad()
+    log_p.retain_grad()
+    s_log_p.retain_grad()
+    first_k.retain_grad()
+    first_k_log_p.retain_grad()
+    adj.retain_grad()
+    k.retain_grad()
+
+    loss.backward()
+
+    print('k', k.grad)
+    print('t', t.grad)
+    print('s_log_p', s_log_p.grad)
+    print('first k', first_k.grad)
+    print('first k log p', first_k_log_p.grad)
+    print('adj', adj.grad)
+    print('\n')
+
+def identity_grad_test(k=0, w=1, N=10):
+    print('IDENTITY k {} w {} N {}'.format(k, w, N))
+    torch.manual_seed(0)
+    k = torch.tensor(k, requires_grad=True)
+    t = torch.arange(N, requires_grad=True)
+    log_p = (torch.rand(int(N)) > 0.5).float()
+    log_p.requires_grad_(True)
+    s_log_p, idxs = torch.sort(log_p, descending=True)
+    first_k = -t + k
+    first_k_log_p = first_k * s_log_p
+    with torch.no_grad():
+        first_k_log_p[:] = torch.clamp(first_k_log_p, min=0, max=1)
+    adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+    y = adj.sum()
+
+    t.retain_grad()
+    log_p.retain_grad()
+    s_log_p.retain_grad()
+    first_k.retain_grad()
+    first_k_log_p.retain_grad()
+    adj.retain_grad()
+    k.retain_grad()
+
+    y.backward()
+
+    # torch.nn.utils.clip_grad_value_(log_p, 1.0)
+    # torch.nn.utils.clip_grad_value_(s_log_p, 1.0)
+
+    print('k', k.grad)
+    print('t', t.grad)
+    print('s_log_p', s_log_p.grad)
+    print('first k', first_k.grad)
+    print('first k log p', first_k_log_p.grad)
+    print('adj', adj.grad)
+
+    plt.scatter(t.detach().numpy(), first_k_log_p.detach().numpy(),
+                label='{}-{}-{}'.format(k, w, N))
+
+def identity_grad_test_01(k=0, w=1, N=10, change=1):
+    print('IDENTITY k {} w {} N {} change {}'.format(k, w, N, change))
+    torch.manual_seed(0)
+    k = torch.tensor(k, requires_grad=True)
+    t = torch.arange(N, requires_grad=True)
+    log_p = (torch.rand(int(N)) > 0.5).float()
+    log_p.requires_grad_(True)
+    s_log_p, idxs = torch.sort(log_p, descending=True)
+    first_k = -t + k
+    first_k_log_p = first_k * s_log_p
+    with torch.no_grad():
+        first_k_log_p[:] = torch.clamp(first_k_log_p, min=0, max=1)
+    adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+    gt_adj = adj.clone().detach()
+    for i in range(change):
+        gt_adj[i] = (gt_adj[i] - 1).abs()
+    print('adj', adj)
+    print('gt adj' ,gt_adj)
+
+    loss = ((gt_adj - adj) ** 2).sum()
+    print('loss',loss)
+
+    t.retain_grad()
+    log_p.retain_grad()
+    s_log_p.retain_grad()
+    first_k.retain_grad()
+    first_k_log_p.retain_grad()
+    adj.retain_grad()
+    k.retain_grad()
+
+    loss.backward()
+
+    # torch.nn.utils.clip_grad_value_(log_p, 1.0)
+    # torch.nn.utils.clip_grad_value_(s_log_p, 1.0)
+
+    print('k', k)
+    print('k grad', k.grad)
+    print('t', t)
+    print('t grad', t.grad)
+    print('s_log_p', s_log_p)
+    print('s_log_p grad', s_log_p.grad)
+    print('first k', first_k)
+    print('first k grad', first_k.grad)
+    print('first k log p', first_k_log_p)
+    print('first k log p grad', first_k_log_p.grad)
+    print('adj', adj)
+    print('adj grad', adj.grad)
+    print('\n')
+
+    fig = plt.figure(figsize=(8, 8))
+    gs = fig.add_gridspec(8, 2)
+    ax00 = fig.add_subplot(gs[0, 0])
+    ax10 = fig.add_subplot(gs[1, 0])
+    ax20 = fig.add_subplot(gs[2, 0])
+    ax21 = fig.add_subplot(gs[2, 1])
+    ax30 = fig.add_subplot(gs[3, 0])
+    ax31 = fig.add_subplot(gs[3, 1])
+    ax40 = fig.add_subplot(gs[4, 0])
+    ax41 = fig.add_subplot(gs[4, 1])
+    ax50 = fig.add_subplot(gs[5, 0])
+    ax51 = fig.add_subplot(gs[5, 1])
+    ax60 = fig.add_subplot(gs[6, 0])
+    ax61 = fig.add_subplot(gs[6, 1])
+    ax70 = fig.add_subplot(gs[7, 0])
+    ax71 = fig.add_subplot(gs[7, 1])
+
+    ax00.imshow(adj.detach().numpy().reshape(1, -1))
+    ax10.imshow(gt_adj.detach().numpy().reshape(1, -1))
+    ax20.imshow(k.detach().numpy().reshape(1, -1))
+    ax21.imshow(k.grad.detach().numpy().reshape(1, -1))
+    ax30.imshow(t.detach().numpy().reshape(1, -1))
+    ax31.imshow(t.grad.detach().numpy().reshape(1, -1))
+    ax40.imshow(s_log_p.detach().numpy().reshape(1, -1))
+    ax41.imshow(s_log_p.grad.detach().numpy().reshape(1, -1))
+    ax50.imshow(first_k.detach().numpy().reshape(1, -1))
+    ax51.imshow(first_k.grad.detach().numpy().reshape(1, -1))
+    ax60.imshow(first_k_log_p.detach().numpy().reshape(1, -1))
+    ax61.imshow(first_k_log_p.grad.detach().numpy().reshape(1, -1))
+    ax70.imshow(adj.detach().numpy().reshape(1, -1))
+    ax71.imshow(adj.grad.detach().numpy().reshape(1, -1))
+
+    ax00.set_title('adj')
+    ax10.set_title('gt_adj')
+    ax20.set_title('k')
+    ax30.set_title('t')
+    ax40.set_title('s_log_p')
+    ax50.set_title('first_k')
+    ax60.set_title('first_k_log_p')
+    ax70.set_title('adj')
+
+    plt.show()
+
+def identity_grad_test_02(k=0, w=1, N=10, change=1):
+    print('IDENTITY k {} w {} N {} change {}'.format(k, w, N, change))
+    torch.manual_seed(0)
+    k = torch.tensor(k, requires_grad=True)
+    t = torch.arange(N, requires_grad=True)
+    log_p = (torch.rand(int(N)) > 0.5).float()
+    log_p.requires_grad_(True)
+    s_log_p, idxs = torch.sort(log_p, descending=True)
+    first_k = -t + k
+    with torch.no_grad():
+        first_k[:] = torch.clamp(first_k, min=0, max=1)
+    adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
+    gt_adj = adj.clone().detach()
+    for i in range(change):
+        gt_adj[i] = (gt_adj[i] - 1).abs()
+    print('adj', adj)
+    print('gt adj' ,gt_adj)
+
+    loss = ((gt_adj - adj) ** 2).sum()
+    print('loss',loss)
+
+    t.retain_grad()
+    log_p.retain_grad()
+    s_log_p.retain_grad()
+    first_k.retain_grad()
+    adj.retain_grad()
+    k.retain_grad()
+
+    loss.backward()
+
+    # torch.nn.utils.clip_grad_value_(log_p, 1.0)
+    # torch.nn.utils.clip_grad_value_(s_log_p, 1.0)
+
+    print('k', k)
+    print('k grad', k.grad)
+    print('t', t)
+    print('t grad', t.grad)
+    print('s_log_p', s_log_p)
+    print('first k', first_k)
+    print('first k grad', first_k.grad)
+    print('adj', adj)
+    print('adj grad', adj.grad)
+    print('\n')
+
+    fig = plt.figure(figsize=(8, 8))
+    gs = fig.add_gridspec(8, 2)
+    ax00 = fig.add_subplot(gs[0, 0])
+    ax10 = fig.add_subplot(gs[1, 0])
+    ax20 = fig.add_subplot(gs[2, 0])
+    ax21 = fig.add_subplot(gs[2, 1])
+    ax30 = fig.add_subplot(gs[3, 0])
+    ax31 = fig.add_subplot(gs[3, 1])
+    ax40 = fig.add_subplot(gs[4, 0])
+    ax41 = fig.add_subplot(gs[4, 1])
+    ax50 = fig.add_subplot(gs[5, 0])
+    ax51 = fig.add_subplot(gs[5, 1])
+    ax60 = fig.add_subplot(gs[6, 0])
+    ax61 = fig.add_subplot(gs[6, 1])
+    ax70 = fig.add_subplot(gs[7, 0])
+    ax71 = fig.add_subplot(gs[7, 1])
+
+    ax00.imshow(adj.detach().numpy().reshape(1, -1))
+    ax10.imshow(gt_adj.detach().numpy().reshape(1, -1))
+    ax20.imshow(k.detach().numpy().reshape(1, -1))
+    ax21.imshow(k.grad.detach().numpy().reshape(1, -1))
+    ax30.imshow(t.detach().numpy().reshape(1, -1))
+    ax31.imshow(t.grad.detach().numpy().reshape(1, -1))
+    ax40.imshow(s_log_p.detach().numpy().reshape(1, -1))
+    ax50.imshow(first_k.detach().numpy().reshape(1, -1))
+    ax51.imshow(first_k.grad.detach().numpy().reshape(1, -1))
+    ax70.imshow(adj.detach().numpy().reshape(1, -1))
+    ax71.imshow(adj.grad.detach().numpy().reshape(1, -1))
+
+    ax00.set_title('adj')
+    ax10.set_title('gt_adj')
+    ax20.set_title('k')
+    ax30.set_title('t')
+    ax40.set_title('s_log_p')
+    ax50.set_title('first_k')
+    ax60.set_title('first_k_log_p')
+    ax70.set_title('adj')
+
+    plt.show()
+
+
 
 if __name__ == "__main__":
 
     # tanh_test_exp(2.5)
     # tanh_test(12.2)
 
-    tanh_plot(k=0, w=1)
-    tanh_plot(k=5, w=1)
-    # tanh_plot(k=-0.5, w=0.5)
-    tanh_plot(k=10, w=1)
-    plt.show()
+    # tanh_plot(k=0, w=1)
+    # tanh_grad_test(k=1.0, w=1, N=7.0)
+    # identity_grad_test(k=1.0, w=1, N=7.0)
+    # plt.legend()
+    # plt.show()
+    #
+    # tanh_grad_test(k=3.0, w=1, N=7.0)
+    # identity_grad_test(k=3.0, w=1, N=7.0)
+    # plt.legend()
+    # plt.show()
+    #
+    # tanh_grad_test(k=7.0, w=1, N=7.0)
+    # identity_grad_test(k=7.0, w=1, N=7.0)
+    # plt.legend()
+    # plt.show()
+
+    # identity_grad_test_01(k=1.0, w=1, N=7.0, change=0)
+    # tanh_grad_test_01(k=1.0, w=1, N=7.0, change=0)
+    # identity_grad_test_01(k=1.0, w=1, N=7.0, change=1)
+    # tanh_grad_test_01(k=1.0, w=1, N=7.0, change=1)
+    # identity_grad_test_01(k=1.0, w=1, N=7.0, change=3)
+    # tanh_grad_test_01(k=1.0, w=1, N=7.0, change=3)
+    # identity_grad_test_01(k=1.0, w=1, N=7.0, change=5)
+
+    identity_grad_test_01(k=1.0, w=1, N=7.0, change=5)
+    identity_grad_test_02(k=1.0, w=1, N=7.0, change=5)
+
+    identity_grad_test_01(k=6.0, w=1, N=7.0, change=5)
+    identity_grad_test_02(k=6.0, w=1, N=7.0, change=5)
 

@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_cora_step5_000_nlayers64", help="experiment name"
+    "--expname", type=str, default="debug_cora", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -37,7 +37,7 @@ parser.add_argument(
 parser.add_argument(
     "--wd2", type=float, default=5e-4, help="weight decay (L2 loss on parameters)."
 )
-parser.add_argument("--layer", type=int, default=64, help="Number of layers.")
+parser.add_argument("--layer", type=int, default=1, help="Number of layers.")
 parser.add_argument("--hidden", type=int, default=64, help="hidden dimensions.")
 parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
@@ -144,7 +144,7 @@ parser.add_argument(
 parser.add_argument(
     "--n_dgg_layers",
     type=int,
-    default=64,
+    default=1,
     help="number of dgg layers",
 )
 
@@ -317,6 +317,9 @@ if __name__ == "__main__":
     best = 999999999
     best_epoch = 0
     acc = 0
+
+    # writer.add_graph(model.cpu(), [features.cpu(), adj.to_dense().cpu()])
+
     for epoch in range(args.epochs):
         loss_tra, acc_tra = train_debug(
             args, model, optimizer, features, adj, labels, idx_train, device, epoch, writer
