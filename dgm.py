@@ -748,11 +748,10 @@ class DGG_LearnableK(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(latent_dim, 1),
         )
-
         self.adj_project = nn.Sequential(
-            nn.Linear(adj_dim, 3),
+            nn.Linear(adj_dim, 1),
             nn.ReLU(),
-            nn.Linear(3, 1),
+            nn.Linear(1, 1),
         )
 
         # Learnable K
@@ -790,11 +789,11 @@ class DGG_LearnableK(nn.Module):
         x = x.unsqueeze(0)  # [1, N, dim]
 
         # embed input and adjacency to get initial edge log probabilities
-        edge_p_mode = 'project_adj'
+        edge_p_mode = None
         edge_p = self.edge_prob_net(in_adj, x, mode=edge_p_mode)    # [N, N]
         edge_p = edge_p.to_dense().unsqueeze(0)                         # [1, N, N]
         edge_p = F.relu(edge_p)     # keep edge probabilities positive
-        # return edge_p   # STEP 0
+        return edge_p   # STEP 0
 
         # add gumbel noise to edge log probabilities
         edge_p = edge_p + 1e-8
@@ -820,7 +819,7 @@ class DGG_LearnableK(nn.Module):
 
         # get smooth top-k
         k, log_k = self.k_estimate_net(
-            N, in_adj, x, mode='learn_normalized_degree'
+            N, in_adj, x, mode='learn_normalized_degree_relu'
         )    # [1, N, 1]
         if writer is not None:
             writer.add_scalar('values/k_std', log_k.std(), epoch)
@@ -978,8 +977,6 @@ class DGG_LearnableK(nn.Module):
         elif mode == 'project_normalized_degree':
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
-            # mu = 3.899
-            # var = 5.288
             mu = self.deg_mean
             var = self.deg_std
             norm_deg = (in_deg - mu) / var
@@ -1006,6 +1003,41 @@ class DGG_LearnableK(nn.Module):
 
             return unnorm_deg, unnorm_deg
 
+        elif mode == 'learn_normalized_degree_v2':
+            in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+
+            mu = in_deg.mean()
+            var = in_deg.std()
+            norm_deg = (in_deg - mu) / var
+
+            deg = self.input_degree_project(norm_deg)  # [1, N, dim]
+            deg = self.k_net(deg)  # [1, N, 1]
+
+            # return to original domain
+            unnorm_deg = (deg * var) + mu
+
+            return unnorm_deg, unnorm_deg
+
+        elif mode == 'learn_normalized_degree_relu':
+            in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+
+            mu = self.deg_mean
+            var = self.deg_std
+            norm_deg = (in_deg - mu) / var
+
+            deg = self.input_degree_project(norm_deg)  # [1, N, dim]
+            deg = self.k_net(deg)  # [1, N, 1]
+            # deg = F.relu(deg)   # keep it positive
+
+            # return to original domain
+            unnorm_deg = (deg * var) + mu
+            unnorm_deg = F.relu(unnorm_deg)
+
+            # add bias (so always minimum of bias)
+            unnorm_deg = unnorm_deg + 1.0
+
+            return unnorm_deg, unnorm_deg
+
     def perturb_edge_prob(self, log_p, noise_sample, noise):
         if noise:
             # During training sample from Gumbel Softmax [B, N, N]
@@ -1015,12 +1047,22 @@ class DGG_LearnableK(nn.Module):
         return edge_log_p
 
     def edge_prob_net(self, in_adj, x, mode=None):
+        """
+        
+        Args:
+            in_adj: [N, N]
+            x: [1, N, dim]
+            mode: 
+
+        Returns:
+
+        """
         if mode is None:
-            u = x[in_adj.indices()[0, :]]  # [n, dim]
-            v = x[in_adj.indices()[1, :]]  # [n, dim]
-            auv = in_adj.values().unsqueeze(-1)  # [n, 1]
-            u_v_auv = torch.concat([u, v, auv], dim=-1)  # [n, dim + dim + 1]
-            z = self.input_adj_project(u_v_auv).flatten()  # [n]
+            u = x[:, in_adj.indices()[0, :]]  # [1, n, dim]
+            v = x[:, in_adj.indices()[1, :]]  # [1, n, dim]
+            auv = in_adj.values().unsqueeze(-1).unsqueeze(0)  # [1, n, 1]
+            u_v = torch.concat([u, v, auv], dim=-1)  # [1, n, dim + dim + 1]
+            z = self.input_adj_project(u_v).flatten()  # [n]
             z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z_matrix
         elif mode == 'pass':
@@ -1032,6 +1074,371 @@ class DGG_LearnableK(nn.Module):
         elif mode == 'project_adj':
             auv = in_adj.values().unsqueeze(-1)  # [n, 1]
             z = self.adj_project(auv).flatten()  # [n]
+            z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
+            return z_matrix
+        elif mode == 'project_adj_dense':
+            auv = in_adj.unsqueeze(-1)  # [N, N, 1]
+            z_matrix = self.adj_project(auv).squeeze(-1).unsqueeze(0)  # [1, N, N]
+            return z_matrix
+        else:
+            raise Exception('mode not found')
+
+
+class DGG_LearnableK_debug(nn.Module):
+    """
+    DGG_learnableK with x_support calculated in each forward pass to account
+    for varying number of input nodes (N)
+    """
+
+    def __init__(
+            self,
+            in_dim=32,
+            adj_dim=1,
+            latent_dim=64,
+            k_bias=1.0,
+            hard=False,
+            self_loops_noise=False,
+            dist_fn="mlp",
+            k_net_input="raw",
+            degree_mean=3,
+            degree_std=5,
+    ):
+        super(DGG_LearnableK_debug, self).__init__()
+
+        # torch.manual_seed(0)
+
+        self.in_dim = in_dim
+        self.adj_dim = adj_dim
+        self.latent_dim = latent_dim
+        self.hard = hard
+        self.self_loops_noise = self_loops_noise
+        self.dist_fn = dist_fn
+        self.k_net_input = k_net_input
+        self.deg_mean = degree_mean
+        self.deg_std = degree_std
+
+        # Embedding layers
+        self.input_project = nn.Sequential(
+            nn.Linear(in_dim, latent_dim),
+            nn.LeakyReLU(),
+        )
+        self.input_degree_project = nn.Linear(1, 3, bias=True)
+        self.input_degree_decode = nn.Linear(3, 1, bias=True)
+        self.combine_input_degree = nn.Sequential(
+            nn.Linear(latent_dim + 3, latent_dim),
+            nn.LeakyReLU(),
+        )
+        self.degree_bias = nn.Parameter(torch.ones(1) * -1)
+
+        self.input_adj_project = nn.Sequential(
+            nn.Linear(in_dim * 2 + adj_dim, latent_dim),
+            nn.LeakyReLU(),
+            nn.Linear(latent_dim, 1),
+        )
+
+        self.adj_project = nn.Linear(1, 1)
+
+        # Learnable K
+        self.register_buffer("k_bias", torch.tensor(k_bias))
+
+        # Option 3, use projected input to get mu, var in latent dim and
+        # then project down to 1
+        self.k_net = LearnableKEncoder(in_dim=3, latent_dim=3)
+
+        self.gumbel = torch.distributions.Gumbel(
+            loc=torch.tensor(0.0), scale=torch.tensor(0.3)
+        )
+
+    def k_hook(self, grad):
+        grad = torch.clamp(grad, min=-0.05, max=0.05)
+        self.k_grad.append(grad)
+
+    def forward(self, x, in_adj, temp, noise=True, writer=None, epoch=None):
+        """
+
+        Args:
+            x: input points [N, dim]
+            in_adj: unnormalized sparse adjacency matrix (coalesced) [N, N]
+        Returns:
+            adj: adjacency matrix [N, N]
+        """
+        assert x.ndim == 2
+        assert len(in_adj.shape) == 2
+
+        # get number of nodes
+        N = x.shape[-2]
+
+        # prepare input featuresfor rest of function
+        x = x.unsqueeze(0)  # [1, N, dim]
+
+        # embed input and adjacency to get initial edge log probabilities
+        edge_p = self.edge_prob_net(in_adj, x, mode='project_adj')  # [N, N]
+        edge_p = edge_p.to_dense().unsqueeze(0)  # [1, N, N]
+        # return edge_p  # STEP 0
+
+        # add gumbel noise to edge log probabilities
+        edge_p = edge_p + 1e-8
+        log_p = torch.log(edge_p)  # [1, N, N]
+        gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
+
+        noise_mode = 'everywhere'
+        if noise_mode == 'non_edges':
+            # only keep noise on non edges
+            mask = 1 - in_adj.to_dense()
+            gumbel_noise = gumbel_noise * mask
+            gumbel_noise = torch.clamp(gumbel_noise, max=0.5)
+        elif noise_mode == 'positive':
+            gumbel_noise = torch.clamp(gumbel_noise, min=0, max=1)
+        elif noise_mode == 'everywhere':
+            pass
+
+        pert_log_p = self.perturb_edge_prob(
+            log_p, noise_sample=gumbel_noise, noise=True
+        )
+        pert_edge_p = torch.exp(pert_log_p)
+        # return pert_edge_p   # STEP 1
+
+        # get smooth top-k
+        k, log_k = self.k_estimate_net(
+            N, in_adj, x, mode='learn_normalized_degree_relu'
+        )  # [1, N, 1]
+        if writer is not None:
+            writer.add_scalar('values/k_std', log_k.std(), epoch)
+            writer.add_scalar('values/k_mean', log_k.mean(), epoch)
+
+        # register hooks for gradients
+        if self.training:
+            self.k_grad = []
+            k_grad = k.register_hook(self.k_hook)
+            k.retain_grad()
+        # select top_k
+        topk_edge_p, top_k = self.select_top_k(
+            N, k, pert_edge_p, mode='k_only',
+            writer=writer, epoch=epoch
+        )
+
+        if writer is not None:
+            writer.add_scalar('values/first_k_std', top_k.sum(-1).std(), epoch)
+            writer.add_scalar('values/first_k_mean', top_k.sum(-1).mean(), epoch)
+
+        if not self.hard:
+            # return adjacency matrix with softmax probabilities
+            return topk_edge_p
+
+        # if hard adj desired, threshold first_k and scatter
+        adj_hard = torch.ones_like(adj)
+        adj_hard.scatter_(dim=-1, index=idxs, src=(top_k > 0.8).float())
+        adj_hard = (adj_hard - adj).detach() + adj
+
+        assert torch.any(torch.isnan(adj_hard)) == False
+        assert torch.any(torch.isinf(adj_hard)) == False
+
+        return adj_hard, k
+
+    def select_top_k(
+            self, N, k, pert_edge_p, mode='k_times_edge_prob',
+            writer=None, epoch=None
+    ):
+        if mode == 'k_times_edge_prob':
+            # sort edge probabilities in DESCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+
+            if writer is not None:
+                writer.add_scalar('values/edge_p_std', s_edge_p.sum(-1).std(), epoch)
+                writer.add_scalar('values/edge_p_mean', s_edge_p.sum(-1).mean(), epoch)
+
+            t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
+            w = 1  # sharpness parameter
+            first_k = 1 - 0.5 * (1 + torch.tanh(
+                (t - k) / w))  # higher k = more items closer to 1
+
+            # Multiply sorted edge log probabilities by first-k and then softmax
+            first_k_log_p = s_edge_p * first_k
+
+            # Unsort
+            adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+            return adj, first_k
+
+        elif mode == 'k_only':
+            # sort edge probabilities in DESCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+
+            t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
+            w = 1  # sharpness parameter
+            first_k = 1 - 0.5 * (1 + torch.tanh(
+                (t - k) / w))  # higher k = more items closer to 1
+
+            # Unsort
+            adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
+            return adj, first_k
+
+        # k_only with linear gradients (instead of tanh saturating grads)
+        elif mode == 'k_only_w_linear_grad':
+            # sort edge probabilities in DESCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+
+            t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
+            first_k = -t + k
+
+            # clamp values in forward to [0, 1] without affecting backward
+            with torch.no_grad():
+                first_k[:] = torch.clamp(first_k, min=0, max=1)
+
+            # Unsort
+            adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
+            return adj, first_k
+
+        # k_only with linear gradients (instead of tanh saturating grads)
+        elif mode == 'k_times_edge_prob_w_linear_grad':
+            # sort edge probabilities in DESCENDING order
+            s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
+
+            t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
+            w = 1  # sharpness parameter
+            first_k = -t + k
+
+            # Multiply sorted edge log probabilities by first-k and then softmax
+            first_k_log_p = s_edge_p * first_k
+
+            # clamp values in forward to [0, 1] without affecting backward
+            with torch.no_grad():
+                first_k_log_p[:] = torch.clamp(first_k_log_p, min=0, max=1)
+
+            # Unsort
+            adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+            return adj, first_k_log_p
+
+    def k_estimate_net(self, N, in_adj, x, mode='calculate'):
+        if mode == 'calculate':
+            in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+            k = (in_degree / N) * 2 - 1
+        elif mode == 'learn':
+            in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+            degree = F.leaky_relu(self.input_degree_project(in_degree))  # [1, N, dim]
+
+            x_proj = self.input_project(x)  # [1, N, dim]
+            feats_for_k = torch.cat([degree, x_proj], dim=-1)  # [1, N, 2 x dim]
+
+            in_k_feats = self.combine_input_degree(feats_for_k)
+
+            # use projected input to get k
+            log_k = self.k_net(in_k_feats)  # [B, N, 1]
+            og_k = torch.exp(log_k)
+
+            # Keep k between -1 and 1
+            k = torch.tanh(log_k)
+        elif mode == 'project_degree':
+            in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+            in_degree = (in_degree / N) * 2 - 1
+            degree = self.input_degree_project(in_degree)  # [1, N, dim]
+            degree = self.input_degree_decode(degree)  # [1, N, 1]
+            log_k = degree
+            return log_k, degree
+        elif mode == 'fixed':
+            k = torch.ones_like(in_adj.to_dense().sum(-1).reshape(1, -1, 1)) * 0
+            k = (k / N) * 2 - 1
+            return k, k
+        elif mode == 'project_normalized_degree':
+            in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+
+            mu = self.deg_mean
+            var = self.deg_std
+            norm_deg = (in_deg - mu) / var
+
+            deg = self.input_degree_project(norm_deg)  # [1, N, dim]
+            deg = self.input_degree_decode(deg)  # [1, N, 1]
+
+            # return to original domain
+            unnorm_deg = (deg * var) + mu
+
+            return unnorm_deg, unnorm_deg
+        elif mode == 'learn_normalized_degree':
+            in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+
+            mu = self.deg_mean
+            var = self.deg_std
+            norm_deg = (in_deg - mu) / var
+
+            deg = self.input_degree_project(norm_deg)  # [1, N, dim]
+            deg = self.k_net(deg)  # [1, N, 1]
+
+            # return to original domain
+            unnorm_deg = (deg * var) + mu
+
+            return unnorm_deg, unnorm_deg
+
+        elif mode == 'learn_normalized_degree_v2':
+            in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+
+            mu = in_deg.mean()
+            var = in_deg.std()
+            norm_deg = (in_deg - mu) / var
+
+            deg = self.input_degree_project(norm_deg)  # [1, N, dim]
+            deg = self.k_net(deg)  # [1, N, 1]
+
+            # return to original domain
+            unnorm_deg = (deg * var) + mu
+
+            return unnorm_deg, unnorm_deg
+
+        elif mode == 'learn_normalized_degree_relu':
+            in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+
+            mu = self.deg_mean
+            var = self.deg_std
+            norm_deg = (in_deg - mu) / var
+
+            deg = self.input_degree_project(norm_deg)  # [1, N, dim]
+            deg = self.k_net(deg)  # [1, N, 1]
+
+            # return to original domain and relu to keep positive
+            unnorm_deg = (deg * var) + mu
+            unnorm_deg = F.relu(unnorm_deg)
+
+            # add bias (so top k selected later is always a minimum of 1)
+            unnorm_deg = unnorm_deg + 1.0
+
+            return unnorm_deg, unnorm_deg
+
+    def perturb_edge_prob(self, log_p, noise_sample, noise):
+        if noise:
+            # During training sample from Gumbel Softmax [B, N, N]
+            edge_log_p = gumbel_sample(log_p, noise_sample)
+        else:
+            edge_log_p = log_p
+        return edge_log_p
+
+    def edge_prob_net(self, in_adj, x, mode=None):
+        """
+
+        Args:
+            in_adj: [N, N]
+            x: [1, N, dim]
+            mode:
+
+        Returns:
+
+        """
+        if mode is None:
+            u = x[:, in_adj.indices()[0, :]]  # [1, n, dim]
+            v = x[:, in_adj.indices()[1, :]]  # [1, n, dim]
+            auv = in_adj.values().unsqueeze(-1).unsqueeze(0)  # [1, n, 1]
+            u_v = torch.concat([u, v, auv], dim=-1)  # [1, n, dim + dim + 1]
+            z = self.input_adj_project(u_v).flatten()  # [n]
+            z = torch.sigmoid(z)  # keep probs positive
+            z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
+            return z_matrix
+        elif mode == 'pass':
+            # for debugging purposes
+            z_matrix = torch.sparse.FloatTensor(
+                in_adj.indices(), in_adj.values(), in_adj.shape
+            )
+            return z_matrix
+        elif mode == 'project_adj':
+            auv = in_adj.values().unsqueeze(-1)  # [n, 1]
+            z = self.adj_project(auv).flatten()  # [n]
+            z = torch.sigmoid(z)   # keep probs positive
             z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z_matrix
         elif mode == 'project_adj_dense':

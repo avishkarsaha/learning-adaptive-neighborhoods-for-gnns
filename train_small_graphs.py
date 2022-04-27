@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_cora_01", help="experiment name"
+    "--expname", type=str, default="gcn_dgg_cora_step2", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -52,7 +52,7 @@ parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
 parser.add_argument(
-    "--model", type=str, default='GCNII_DGG', help="model name"
+    "--model", type=str, default='GCN_DGG', help="model name"
 )
 # Differentiable graph generator specific
 parser.add_argument(
@@ -148,12 +148,11 @@ parser.add_argument(
     help="number of dgg layers",
 )
 parser.add_argument(
-    "--normalize_adj",
+    "--pre_normalize_adj",
     type=str2bool,
     default=False,
-    help="number of dgg layers",
+    help="normalize adjacency matrix outside network",
 )
-
 
 def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
     torch.save(
@@ -201,8 +200,17 @@ def train_debug(
     loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
     loss_train.backward()
 
-    writer.add_scalar('k_grad_mean', model.dggs[0].k_grad[0].mean(), epoch)
-    writer.add_scalar('k_grad_std', model.dggs[0].k_grad[0].std(), epoch)
+    # for name, p in model.dggs[0].named_parameters():
+    #     if 'adj_project' in name:
+    #         writer.add_histogram('adj_proj_w', p.item(), epoch)
+    #         writer.add_histogram('adj_proj_grad', p.grad, epoch)
+    # #
+    # for name, p in model.named_parameters():
+    #     if p.grad is not None:
+    #         print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
+
+    # writer.add_scalar('k_grad_mean', model.dggs[0].k_grad[0].mean(), epoch)
+    # writer.add_scalar('k_grad_std', model.dggs[0].k_grad[0].std(), epoch)
 
     # k_net_grads =  torch.cat(
     #     [p.grad.flatten() for name, p in model.dggs.named_parameters()
@@ -290,8 +298,10 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
+    if 'DGG' not in args.model:
+        args.pre_normalize_adj = True
     adj, features, labels, idx_train, idx_val, idx_test = load_citation(
-        args.data, args.root, normalize_adj=args.normalize_adj
+        args.data, args.root, normalize_adj=args.pre_normalize_adj
     )
     cudaid = "cuda"
     device = torch.device(cudaid)
@@ -311,13 +321,20 @@ if __name__ == "__main__":
         args=args
     ).to(device)
 
-    optimizer = optim.Adam(
-        [
-            {"params": model.params1, "weight_decay": args.wd1},
-            {"params": model.params2, "weight_decay": args.wd2},
-        ],
-        lr=args.lr,
-    )
+    if 'GCNII' in args.model:
+        optimizer = optim.Adam(
+            [
+                {"params": model.params1, "weight_decay": args.wd1},
+                {"params": model.params2, "weight_decay": args.wd2},
+            ],
+            lr=args.lr,
+        )
+    else:
+        optimizer = optim.Adam([
+            dict(params=model.params1, weight_decay=5e-4),
+            dict(params=model.params2, weight_decay=0)
+        ], lr=args.lr)  # Only perform weight-decay on first convolution.
+
 
     # Run
     t_total = time.time()
