@@ -1095,13 +1095,7 @@ class DGG_LearnableK_debug(nn.Module):
             in_dim=32,
             adj_dim=1,
             latent_dim=64,
-            k_bias=1.0,
-            hard=False,
-            self_loops_noise=False,
-            dist_fn="mlp",
-            k_net_input="raw",
-            degree_mean=3,
-            degree_std=5,
+            args=None
     ):
         super(DGG_LearnableK_debug, self).__init__()
 
@@ -1110,14 +1104,11 @@ class DGG_LearnableK_debug(nn.Module):
         self.in_dim = in_dim
         self.adj_dim = adj_dim
         self.latent_dim = latent_dim
-        self.hard = hard
-        self.self_loops_noise = self_loops_noise
-        self.dist_fn = dist_fn
-        self.k_net_input = k_net_input
-        self.deg_mean = degree_mean
-        self.deg_std = degree_std
+        self.hard = args.dgg_hard
+        self.deg_mean = args.deg_mean
+        self.deg_std = args.deg_std
 
-        # Embedding layers
+        # Edge probability network
         self.input_project = nn.Sequential(
             nn.Linear(in_dim, latent_dim),
             nn.LeakyReLU(),
@@ -1128,23 +1119,20 @@ class DGG_LearnableK_debug(nn.Module):
             nn.Linear(latent_dim + 3, latent_dim),
             nn.LeakyReLU(),
         )
-        self.degree_bias = nn.Parameter(torch.ones(1) * -1)
-
         self.input_adj_project = nn.Sequential(
             nn.Linear(in_dim * 2 + adj_dim, latent_dim),
             nn.LeakyReLU(),
             nn.Linear(latent_dim, 1),
         )
-
         self.adj_project = nn.Linear(1, 1)
+        self.edge_prob_net_mode = args.dgg_mode_edge_net
 
-        # Learnable K
-        self.register_buffer("k_bias", torch.tensor(k_bias))
-
-        # Option 3, use projected input to get mu, var in latent dim and
-        # then project down to 1
+        # Learnable K network
         self.k_net = LearnableKEncoder(in_dim=3, latent_dim=3)
+        self.k_net_mode = args.dgg_mode_k_net
+        self.k_select_mode = args.dgg_mode_k_select
 
+        # Gumbel noise sampler
         self.gumbel = torch.distributions.Gumbel(
             loc=torch.tensor(0.0), scale=torch.tensor(0.3)
         )
@@ -1153,14 +1141,14 @@ class DGG_LearnableK_debug(nn.Module):
         grad = torch.clamp(grad, min=-0.05, max=0.05)
         self.k_grad.append(grad)
 
-    def forward(self, x, in_adj, temp, noise=True, writer=None, epoch=None):
+    def forward(self, x, in_adj, noise=True, writer=None, epoch=None):
         """
 
         Args:
             x: input points [N, dim]
             in_adj: unnormalized sparse adjacency matrix (coalesced) [N, N]
         Returns:
-            adj: adjacency matrix [N, N]
+            adj: unnormalized sparse adjacency matrix [N, N]
         """
         assert x.ndim == 2
         assert len(in_adj.shape) == 2
@@ -1172,7 +1160,9 @@ class DGG_LearnableK_debug(nn.Module):
         x = x.unsqueeze(0)  # [1, N, dim]
 
         # embed input and adjacency to get initial edge log probabilities
-        edge_p = self.edge_prob_net(in_adj, x, mode='project_adj')  # [N, N]
+        edge_p = self.edge_prob_net(in_adj, x, mode=self.edge_prob_net_mode)  # [N, N]
+
+        # perform rest of forward on dense tensors
         edge_p = edge_p.to_dense().unsqueeze(0)  # [1, N, N]
         # return edge_p  # STEP 0
 
@@ -1180,50 +1170,32 @@ class DGG_LearnableK_debug(nn.Module):
         edge_p = edge_p + 1e-8
         log_p = torch.log(edge_p)  # [1, N, N]
         gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
-
-        noise_mode = 'everywhere'
-        if noise_mode == 'non_edges':
-            # only keep noise on non edges
-            mask = 1 - in_adj.to_dense()
-            gumbel_noise = gumbel_noise * mask
-            gumbel_noise = torch.clamp(gumbel_noise, max=0.5)
-        elif noise_mode == 'positive':
-            gumbel_noise = torch.clamp(gumbel_noise, min=0, max=1)
-        elif noise_mode == 'everywhere':
-            pass
-
         pert_log_p = self.perturb_edge_prob(
-            log_p, noise_sample=gumbel_noise, noise=True
+            log_p, noise_sample=gumbel_noise, noise=noise
         )
         pert_edge_p = torch.exp(pert_log_p)
         # return pert_edge_p   # STEP 1
 
         # get smooth top-k
         k, log_k = self.k_estimate_net(
-            N, in_adj, x, mode='learn_normalized_degree_relu'
+            N, in_adj, x, mode=self.k_net_mode
         )  # [1, N, 1]
         if writer is not None:
             writer.add_scalar('values/k_std', log_k.std(), epoch)
             writer.add_scalar('values/k_mean', log_k.mean(), epoch)
 
-        # register hooks for gradients
-        if self.training:
-            self.k_grad = []
-            k_grad = k.register_hook(self.k_hook)
-            k.retain_grad()
         # select top_k
         topk_edge_p, top_k = self.select_top_k(
-            N, k, pert_edge_p, mode='k_only',
+            N, k, pert_edge_p, mode=self.k_select_mode,
             writer=writer, epoch=epoch
-        )
-
+        )   # [1, N, N]
         if writer is not None:
             writer.add_scalar('values/first_k_std', top_k.sum(-1).std(), epoch)
             writer.add_scalar('values/first_k_mean', top_k.sum(-1).mean(), epoch)
 
         if not self.hard:
             # return adjacency matrix with softmax probabilities
-            return topk_edge_p
+            return topk_edge_p.squeeze(0).to_sparse()
 
         # if hard adj desired, threshold first_k and scatter
         adj_hard = torch.ones_like(adj)
@@ -1341,8 +1313,8 @@ class DGG_LearnableK_debug(nn.Module):
         elif mode == 'project_normalized_degree':
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
-            mu = self.deg_mean
-            var = self.deg_std
+            mu = in_deg.mean()
+            var = in_deg.std()
             norm_deg = (in_deg - mu) / var
 
             deg = self.input_degree_project(norm_deg)  # [1, N, dim]
@@ -1355,8 +1327,8 @@ class DGG_LearnableK_debug(nn.Module):
         elif mode == 'learn_normalized_degree':
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
-            mu = self.deg_mean
-            var = self.deg_std
+            mu = in_deg.mean()
+            var = in_deg.std()
             norm_deg = (in_deg - mu) / var
 
             deg = self.input_degree_project(norm_deg)  # [1, N, dim]
@@ -1385,9 +1357,9 @@ class DGG_LearnableK_debug(nn.Module):
         elif mode == 'learn_normalized_degree_relu':
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
-            mu = self.deg_mean
-            var = self.deg_std
-            norm_deg = (in_deg - mu) / var
+            mu = in_deg.mean()
+            var = in_deg.std()
+            norm_deg = (in_deg - mu) / (var + 1e-5)
 
             deg = self.input_degree_project(norm_deg)  # [1, N, dim]
             deg = self.k_net(deg)  # [1, N, 1]

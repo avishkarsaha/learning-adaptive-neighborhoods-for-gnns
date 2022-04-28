@@ -118,6 +118,103 @@ class GCNII(nn.Module):
         layer_inner = self.fcs[-1](layer_inner)
         return F.log_softmax(layer_inner, dim=1)
 
+# class GCNII_DGG(nn.Module):
+#     def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args):
+#         super(GCNII_DGG, self).__init__()
+#         self.convs = nn.ModuleList()
+#         for _ in range(nlayers):
+#             self.convs.append(DenseGraphConvolution(nhidden, nhidden, variant=variant))
+#
+#         self.fcs = nn.ModuleList()
+#         self.fcs.append(nn.Linear(nfeat, nhidden))
+#         self.fcs.append(nn.Linear(nhidden, nclass))
+#
+#         self.dgm_dim = args.dgm_dim
+#         self.st_gumbel_softmax = args.st_gumbel_softmax
+#         self.self_loops_noise = args.self_loops_noise
+#         self.k_bias = args.k_bias
+#         self.dgg_dist_fn = args.dgg_dist_fn
+#         self.k_net_input = args.k_net_input
+#         self.deg_mean = args.deg_mean
+#         self.deg_std = args.deg_std
+#         self.dgm_temp = args.dgm_temp
+#
+#         self.dggs = nn.ModuleList()
+#         for _ in range(args.n_dgg_layers):
+#             self.dggs.append(
+#                 DGG_LearnableK(
+#                     in_dim=nhidden, latent_dim=nhidden, k_bias=self.k_bias,
+#                     hard=self.st_gumbel_softmax, self_loops_noise=self.self_loops_noise,
+#                     dist_fn=self.dgg_dist_fn, k_net_input=args.k_net_input,
+#                     degree_mean=self.deg_mean, degree_std=self.deg_std,
+#                 )
+#             )
+#
+#         self.params1 = list(self.convs.parameters())
+#         self.params1.extend(list(self.dggs.parameters()))
+#         self.params2 = list(self.fcs.parameters())
+#         self.act_fn = nn.ReLU()
+#         self.dropout = dropout
+#         self.alpha = alpha
+#         self.lamda = lamda
+#
+#     def forward(self, x, adj, epoch=None, writer=None):
+#         """
+#         x: input features [N, dim]
+#         adj: sparse adjacency matrix [N, N] without self loops
+#         """
+#
+#         # x = x[:5]
+#         # adj = adj.to_dense()[:5].to_sparse()
+#         # print(adj.to_dense().sum(-1).mean(), adj.to_dense().sum(-1).max(), adj.to_dense().sum(-1).min())
+#
+#         # coalesce input adjacency matrix as we want to track its gradients
+#         adj = adj.coalesce()
+#
+#         # if writer is not None:
+#         #     writer.add_histogram('train/og_node_degree', adj.to_dense().sum(-1), epoch)
+#
+#         _layers = []
+#         x = F.dropout(x, self.dropout, training=self.training)
+#         layer_inner = self.act_fn(self.fcs[0](x))
+#         _layers.append(layer_inner)
+#
+#         mode = 'add_self_loops'
+#         if mode == 'self_loops_present':
+#             # add self loops
+#             adj = (
+#                     adj.to_dense() + torch.eye(adj.shape[0], device=adj.device)
+#             ).to_sparse()
+#
+#         for i, con in enumerate(self.convs):
+#
+#             # learn structure and get adjacency matrix
+#             if i < len(self.dggs):
+#                 adj = self.dggs[i](
+#                     x=layer_inner, in_adj=adj,
+#                     temp=self.dgm_temp, noise=False, writer=writer, epoch=epoch
+#                 )
+#                 adj = adj.squeeze(0)
+#                 # if writer is not None:
+#                 #     writer.add_histogram(
+#                 #         'train/our_node_degree',
+#                 #         (adj > 0.5).float().sum(-1), epoch
+#                 #     )
+#                 #     writer.add_histogram('train/k', k.flatten(), epoch)
+#
+#                 adj = torch_normalized_adjacency(adj, mode=mode)
+#                 # adj = adj.to_sparse()
+#                 # print('adj', adj.sum(-1).mean().item(), adj.sum(-1).max().item(), adj.sum(-1).mean().item())
+#
+#             layer_inner = F.dropout(layer_inner, self.dropout, training=self.training)
+#             layer_inner = self.act_fn(
+#                 con(layer_inner, adj, _layers[0], self.lamda, self.alpha, i + 1)
+#             )
+#         layer_inner = F.dropout(layer_inner, self.dropout, training=self.training)
+#         layer_inner = self.fcs[-1](layer_inner)
+#
+#         return F.log_softmax(layer_inner, dim=1)
+
 class GCNII_DGG(nn.Module):
     def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args):
         super(GCNII_DGG, self).__init__()
@@ -129,24 +226,12 @@ class GCNII_DGG(nn.Module):
         self.fcs.append(nn.Linear(nfeat, nhidden))
         self.fcs.append(nn.Linear(nhidden, nclass))
 
-        self.dgm_dim = args.dgm_dim
-        self.st_gumbel_softmax = args.st_gumbel_softmax
-        self.self_loops_noise = args.self_loops_noise
-        self.k_bias = args.k_bias
-        self.dgg_dist_fn = args.dgg_dist_fn
-        self.k_net_input = args.k_net_input
-        self.deg_mean = args.deg_mean
-        self.deg_std = args.deg_std
-        self.dgm_temp = args.dgm_temp
-
+        self.dgg_adj_input = args.dgg_adj_input
         self.dggs = nn.ModuleList()
         for _ in range(args.n_dgg_layers):
             self.dggs.append(
-                DGG_LearnableK(
-                    in_dim=nhidden, latent_dim=nhidden, k_bias=self.k_bias,
-                    hard=self.st_gumbel_softmax, self_loops_noise=self.self_loops_noise,
-                    dist_fn=self.dgg_dist_fn, k_net_input=args.k_net_input,
-                    degree_mean=self.deg_mean, degree_std=self.deg_std,
+                DGG_LearnableK_debug(
+                    in_dim=nfeat, latent_dim=nhidden, args=args
                 )
             )
 
@@ -158,62 +243,72 @@ class GCNII_DGG(nn.Module):
         self.alpha = alpha
         self.lamda = lamda
 
-    def forward(self, x, adj, epoch=None, writer=None):
+    def normalize_adj(self, A_hat):
         """
-        x: input features [N, dim]
-        adj: sparse adjacency matrix [N, N] without self loops
+        renormalisation of adjacency matrix
+        Args:
+            A_hat: adj mat with self loops [N, N]
+
+        Returns:
+            A_hat: renormalized adjaceny [N, N]
+
         """
+        row_sum = A_hat.sum(-1)
+        row_sum = (row_sum) ** -0.5
+        D = torch.diag(row_sum)
+        A_hat = torch.mm(torch.mm(D, A_hat), D)
+        return A_hat
 
-        # x = x[:5]
-        # adj = adj.to_dense()[:5].to_sparse()
-        # print(adj.to_dense().sum(-1).mean(), adj.to_dense().sum(-1).max(), adj.to_dense().sum(-1).min())
+    def forward(self, x, in_adj, epoch=None, writer=None):
+        """
+        Args:
+            x: node features
+            A: sparse unnormalized adjacency matrix without self loops
+            epoch: epoch number
+            writer: tensorboard summary writer
 
-        # coalesce input adjacency matrix as we want to track its gradients
-        adj = adj.coalesce()
-
-        # if writer is not None:
-        #     writer.add_histogram('train/og_node_degree', adj.to_dense().sum(-1), epoch)
-
+        Returns:
+            out: class predictions for each node
+        """
         _layers = []
         x = F.dropout(x, self.dropout, training=self.training)
         layer_inner = self.act_fn(self.fcs[0](x))
         _layers.append(layer_inner)
 
-        mode = 'add_self_loops'
-        if mode == 'self_loops_present':
-            # add self loops
-            adj = (
-                    adj.to_dense() + torch.eye(adj.shape[0], device=adj.device)
-            ).to_sparse()
+        # add self-loops
+        in_adj = (
+                in_adj.to_dense() +
+                torch.eye(in_adj.shape[0], device=in_adj.device)
+        ).to_sparse()
 
+        # coalesce to track grads
+        unnorm_adj = in_adj.coalesce()
         for i, con in enumerate(self.convs):
-
-            # learn structure and get adjacency matrix
             if i < len(self.dggs):
-                adj = self.dggs[i](
-                    x=layer_inner, in_adj=adj,
-                    temp=self.dgm_temp, noise=False, writer=writer, epoch=epoch
-                )
-                adj = adj.squeeze(0)
-                # if writer is not None:
-                #     writer.add_histogram(
-                #         'train/our_node_degree',
-                #         (adj > 0.5).float().sum(-1), epoch
-                #     )
-                #     writer.add_histogram('train/k', k.flatten(), epoch)
-
-                adj = torch_normalized_adjacency(adj, mode=mode)
-                # adj = adj.to_sparse()
-                # print('adj', adj.sum(-1).mean().item(), adj.sum(-1).max().item(), adj.sum(-1).mean().item())
+                if self.dgg_adj_input == 'input_adj':
+                    # always use input adjacency
+                    unnorm_adj = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
+                else:
+                    # use updated adjacency
+                    unnorm_adj = self.dgg_net(x, i, unnorm_adj, writer, epoch)
+                norm_adj = self.normalize_adj(unnorm_adj.to_dense())
 
             layer_inner = F.dropout(layer_inner, self.dropout, training=self.training)
             layer_inner = self.act_fn(
-                con(layer_inner, adj, _layers[0], self.lamda, self.alpha, i + 1)
+                con(layer_inner, norm_adj, _layers[0], self.lamda, self.alpha, i + 1)
             )
         layer_inner = F.dropout(layer_inner, self.dropout, training=self.training)
         layer_inner = self.fcs[-1](layer_inner)
 
         return F.log_softmax(layer_inner, dim=1)
+
+    def dgg_net(self, x, i, unnorm_adj, writer, epoch):
+        # learn adjacency (sparse tensor)
+        adj = self.dggs[i](
+            x=x, in_adj=unnorm_adj, noise=self.training,
+            writer=writer, epoch=epoch
+        )
+        return adj
 
 class GCNII_DGG_viz(nn.Module):
     def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha,
@@ -445,27 +540,20 @@ class GCN(torch.nn.Module):
 class GCN_DGG(torch.nn.Module):
     def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs):
         super(GCN_DGG, self).__init__()
+
+        # GCN layers
+        self.convs = nn.ModuleList()
         self.conv1 = GCNConv(nfeat, nhidden)
         self.conv2 = GCNConv(nhidden, nclass)
+        self.convs.append(self.conv1)
+        self.convs.append(self.conv2)
 
-        self.dgm_dim = args.dgm_dim
-        self.st_gumbel_softmax = args.st_gumbel_softmax
-        self.self_loops_noise = args.self_loops_noise
-        self.k_bias = args.k_bias
-        self.dgg_dist_fn = args.dgg_dist_fn
-        self.k_net_input = args.k_net_input
-        self.deg_mean = args.deg_mean
-        self.deg_std = args.deg_std
-        self.dgm_temp = args.dgm_temp
-
+        self.dgg_adj_input = args.dgg_adj_input
         self.dggs = nn.ModuleList()
         for _ in range(args.n_dgg_layers):
             self.dggs.append(
                 DGG_LearnableK_debug(
-                    in_dim=nfeat, latent_dim=nhidden, k_bias=self.k_bias,
-                    hard=self.st_gumbel_softmax, self_loops_noise=self.self_loops_noise,
-                    dist_fn=self.dgg_dist_fn, k_net_input=args.k_net_input,
-                    degree_mean=self.deg_mean, degree_std=self.deg_std,
+                    in_dim=nfeat, latent_dim=nhidden, args=args
                 )
             )
 
@@ -500,27 +588,47 @@ class GCN_DGG(torch.nn.Module):
         Returns:
             out: class predictions for each node
         """
+        # add self-loops
+        in_adj = (
+                in_adj.to_dense() +
+                torch.eye(in_adj.shape[0], device=in_adj.device)
+        ).to_sparse()
 
-        # coalesce input adjacency matrix as we want to track its gradients
-        out_adj = self.dggs[0](
-            x=x, in_adj=in_adj.coalesce(), temp=self.dgm_temp,
-            noise=False, writer=writer, epoch=epoch
-        )                       # [1, N, N]
-        out_adj = out_adj.squeeze(0)    # [N, N]
-        adj = self.normalize_adj(out_adj)
+        # coalesce to track grads
+        unnorm_adj = in_adj.coalesce()
 
-        in_adj = in_adj.to_dense()
-        if writer is not None:
-            deg_diff = torch.abs(out_adj.sum(-1) - in_adj.sum(-1))
-            writer.add_scalar('values/deg_diff_std', deg_diff.std(), epoch)
-            writer.add_scalar('values/deg_diff_mean', deg_diff.mean(), epoch)
-            writer.add_scalar('values/deg_std', out_adj.sum(-1).std(), epoch)
-            writer.add_scalar('values/deg_mean', out_adj.sum(-1).mean(), epoch)
+        for i, conv in enumerate(self.convs):
+            if i < len(self.dggs):
+                if self.dgg_adj_input == 'input_adj':
+                    # always use input adjacency
+                    unnorm_adj = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
+                else:
+                    # use updated adjacency
+                    unnorm_adj = self.dgg_net(x, i, unnorm_adj, writer, epoch)
+                norm_adj = self.normalize_adj(unnorm_adj.to_dense())
+            x = conv(x, norm_adj)
+            if i < len(self.convs) - 1:
+                x = F.dropout(x, training=self.training)
 
-        x = F.dropout(self.conv1(x, adj), training=self.training)
-        x = self.conv2(x, adj)
         out = F.log_softmax(x, dim=-1)
+
+        # in_adj = in_adj.to_dense()
+        # if writer is not None:
+        #     deg_diff = torch.abs(out_adj.sum(-1) - in_adj.sum(-1))
+        #     writer.add_scalar('values/deg_diff_std', deg_diff.std(), epoch)
+        #     writer.add_scalar('values/deg_diff_mean', deg_diff.mean(), epoch)
+        #     writer.add_scalar('values/deg_std', out_adj.sum(-1).std(), epoch)
+        #     writer.add_scalar('values/deg_mean', out_adj.sum(-1).mean(), epoch)
+
         return out
+
+    def dgg_net(self, x, i, unnorm_adj, writer, epoch):
+        # learn adjacency (sparse tensor)
+        adj = self.dggs[i](
+            x=x, in_adj=unnorm_adj, noise=self.training,
+            writer=writer, epoch=epoch
+        )
+        return adj
 
 
 if __name__ == "__main__":
