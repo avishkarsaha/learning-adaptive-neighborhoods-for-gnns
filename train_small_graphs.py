@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="gcn_dgg_cora_wselfloops", help="experiment name"
+    "--expname", type=str, default="cora_gcn_dgg_uvDist_edgePCDF", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -54,12 +54,30 @@ parser.add_argument(
 parser.add_argument(
     "--model", type=str, default='GCN_DGG', help="model name"
 )
+parser.add_argument(
+    "--edge_noise_level",
+    type=float,
+    default=0.0,
+    help="percentage of noisy edges to add",
+)
 # Differentiable graph generator specific
 parser.add_argument(
     "--dgm_dim",
     type=int,
     default=128,
     help="Dimensions of the linear projection layer in the DGM",
+)
+parser.add_argument(
+    "--extra_edge_dim",
+    type=int,
+    default=2,
+    help="extra edge dimension (for degree etc)",
+)
+parser.add_argument(
+    "--extra_k_dim",
+    type=int,
+    default=1,
+    help="extra k dimension (for degree etc)",
 )
 parser.add_argument(
     "--dgg_hard",
@@ -127,21 +145,24 @@ parser.add_argument(
 parser.add_argument(
     "--dgg_mode_edge_net",
     type=str,
-    default='project_adj',
+    default='u-v-dist',
+    choices=['u-v-dist', 'u-v-A_uv', 'u-v-deg', 'edge_conv', 'A_uv'],
     help="mode for the edge_prob_net in DGG, determines which features are used"
          "in the forward pass",
 )
 parser.add_argument(
     "--dgg_mode_k_net",
     type=str,
-    default='learn_normalized_degree_relu',
+    default='pass',
+    choices=['pass', 'input_deg', 'gcn-x-deg', 'x'],
     help="mode for the k_estimate_net in DGG, determines which features are used"
          "in the forward pass",
 )
 parser.add_argument(
     "--dgg_mode_k_select",
     type=str,
-    default='k_times_edge_prob',
+    default='edge_p-cdf',
+    choices=['edge_p-cdf', 'k_only', 'k_times_edge_prob'],
     help="mode for the k_selector in DGG, determines which features are used"
          "in the forward pass",
 )
@@ -293,7 +314,8 @@ if __name__ == "__main__":
     if 'DGG' not in args.model:
         args.pre_normalize_adj = True
     adj, features, labels, idx_train, idx_val, idx_test = load_citation(
-        args.data, args.root, normalize_adj=args.pre_normalize_adj
+        args.data, args.root, normalize_adj=args.pre_normalize_adj,
+        noise=args.edge_noise_level
     )
     cudaid = "cuda"
     device = torch.device(cudaid)

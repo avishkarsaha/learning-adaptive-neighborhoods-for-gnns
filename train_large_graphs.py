@@ -27,7 +27,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="debug_lg", help="experiment name"
+    "--expname", type=str, default="ppi_gcnii_dgg_k_only", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -56,35 +56,28 @@ parser.add_argument(
 )
 # Differentiable graph generator specific
 parser.add_argument(
-    "--graph_gen_space",
-    type=str,
-    default="embedding",
-    choices=["input", "embedding"],
-    help="euclidean space of nodes in which to calculate adjacency matrix",
-)
-parser.add_argument(
     "--dgm_dim",
     type=int,
     default=128,
     help="Dimensions of the linear projection layer in the DGM",
 )
 parser.add_argument(
-    "--spatial-k",
+    "--extra_edge_dim",
     type=int,
-    default=2,
-    help="number of nearest neighbours in space in DGM",
+    default=1,
+    help="extra edge dimension (for degree etc)",
 )
 parser.add_argument(
-    "--self_loops_noise",
-    type=str2bool,
-    default=False,
-    help="Whether to add gumbel noise to self loop edge probabilities",
+    "--extra_k_dim",
+    type=int,
+    default=1,
+    help="extra k dimension (for degree etc)",
 )
 parser.add_argument(
-    "--st_gumbel_softmax",
+    "--dgg_hard",
     type=str2bool,
     default=False,
-    help="Whether to do straight through gumbel softmax "
+    help="Whether to do straight through gumbel softmax"
     "(argmax in forward, softmax in backward) or just softmax top k in both",
 )
 parser.add_argument(
@@ -100,34 +93,16 @@ parser.add_argument(
     help="Whether to add noise to when sampling at test time",
 )
 parser.add_argument(
-    "--dgg_dist_fn",
-    type=str,
-    default="metric",
-    help="distance function for calculating edge probabilities",
-)
-parser.add_argument(
-    "--k_bias",
-    type=float,
-    default=1.0,
-    help="bias to add to predicted K value",
-)
-parser.add_argument(
-    "--k_net_input",
-    type=str,
-    default="raw",
-    help="input features to Learnable K network",
-)
-parser.add_argument(
     "--deg_mean",
     type=float,
-    default=18.620,
-    help="heaviside project points x start",
+    default=3.899,
+    help="adjacecny matrix degree mean",
 )
 parser.add_argument(
     "--deg_std",
     type=float,
-    default=30.848,
-    help="heaviside project points x end",
+    default=5.288,
+    help="adjacecny matrix degree std",
 )
 parser.add_argument(
     "--node_sampling_ratio",
@@ -147,7 +122,41 @@ parser.add_argument(
     default=1,
     help="number of dgg layers",
 )
-
+parser.add_argument(
+    "--pre_normalize_adj",
+    type=str2bool,
+    default=False,
+    help="pre normalize adjacency matrix outside network",
+)
+parser.add_argument(
+    "--dgg_adj_input",
+    type=str,
+    default='input_adj',
+    help="type of adjacency matrix to use for DGG, input_adj refers to the "
+         "original input adjacency matrix, anything else refers to using the "
+         "learned adjancency matrix",
+)
+parser.add_argument(
+    "--dgg_mode_edge_net",
+    type=str,
+    default='project_adj',
+    help="mode for the edge_prob_net in DGG, determines which features are used"
+         "in the forward pass",
+)
+parser.add_argument(
+    "--dgg_mode_k_net",
+    type=str,
+    default='learn_normalized_degree_relu',
+    help="mode for the k_estimate_net in DGG, determines which features are used"
+         "in the forward pass",
+)
+parser.add_argument(
+    "--dgg_mode_k_select",
+    type=str,
+    default='k_only',
+    help="mode for the k_selector in DGG, determines which features are used"
+         "in the forward pass",
+)
 
 def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
     torch.save(
@@ -164,7 +173,7 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
 
 def train(
         args, model, optimizer, train_feat, train_adj,
-        train_labels, train_nodes, loss_fcn, device, writer
+        train_labels, train_nodes, loss_fcn, device, writer, epoch
 ):
     model.train()
     loss_tra = 0
@@ -174,7 +183,7 @@ def train(
         batch_feature = train_feat[batch[0]].to(device)
         batch_label = train_labels[batch[0]].to(device)
         optimizer.zero_grad()
-        output = model(batch_feature, batch_adj)
+        output = model(batch_feature, batch_adj, writer, epoch)
         loss_train = loss_fcn(
             output[: train_nodes[batch]], batch_label[: train_nodes[batch]]
         )
@@ -323,8 +332,11 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
+    if 'DGG' not in args.model:
+        args.pre_normalize_adj = True
     train_adj, val_adj, test_adj, train_feat, val_feat, test_feat, \
-    train_labels, val_labels, test_labels, train_nodes, val_nodes, test_nodes = load_ppi()
+    train_labels, val_labels, test_labels, train_nodes, val_nodes, \
+    test_nodes = load_ppi_from_disk(normalize_adj=args.pre_normalize_adj)
     cudaid = "cuda"
     device = torch.device(cudaid)
 
@@ -355,7 +367,7 @@ if __name__ == "__main__":
     for epoch in range(args.epochs):
         loss_tra, acc_tra = train(
             args, model, optimizer, train_feat, train_adj,
-            train_labels, train_nodes, loss_fcn, device, writer
+            train_labels, train_nodes, loss_fcn, device, writer, epoch
         )
         loss_val, acc_val = validate(
             args, model, val_feat, val_adj, val_labels, val_nodes, loss_fcn, device

@@ -11,3 +11,10 @@ step 2  - predicting k and then selecting top k reduces acc a little (75% acc)
 step 3	- k_only_w_linear_grad brings acc down (65% acc)
 step 4	- k_times_edge_prob gets SOTA (81% acc)
 
+2 DGG layers, with input_adj for each DGG layer
+	- acc plateaus around 79%, lower than our 81% best
+2 DGG layers, with previous_adj for each DGG layer
+	- does slightly better than using input_Adj for each DGG layer
+
+
+
