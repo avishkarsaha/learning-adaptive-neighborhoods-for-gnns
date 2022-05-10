@@ -1,0 +1,5 @@
+AIM: GCN_DGG should achieve same accuracy as GCN, currenty 98% vs 88%
+step 0	- bypassing the edge prob net by using the input adjacency doesn affect acc,
+	  which means the issue lies somewhere in select_top_k
+	- its the tiny bit of noise 1e-8 that was reducing acc, now at 97%
+

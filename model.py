@@ -86,7 +86,11 @@ class GCNConv(nn.Module):
         Returns:
 
         """
-        out = torch.relu(torch.mm(torch.mm(adj, x), self.W))
+        Ax = torch.mm(adj, x)
+        # print('Ax mu: {:.3f} std: {:.3f}'.format(Ax.mean().item(), Ax.std().item()),)
+        AxW = torch.mm(Ax, self.W)
+        # print('AxW mu: {:.3f} std: {:.3f}'.format(AxW.mean().item(), AxW.std().item()), )
+        out = torch.relu(AxW)
         return out
 
 class GCNII(nn.Module):
@@ -569,9 +573,25 @@ class GCN_debug(torch.nn.Module):
         """
         adj = adj.to_dense()
         adj = self.normalize_adj(adj)
+
+        if writer is not None:
+            u = x[torch.where(adj > 0)[0]]
+            v = x[torch.where(adj > 0)[1]]
+            dist = torch.linalg.vector_norm(u - v, dim=-1, ord=2)
+
+        #     deg_diff = torch.abs(out_adj.sum(-1) - in_adj.sum(-1))
+        #     writer.add_scalar('values/deg_diff_std', deg_diff.std(), epoch)
+        #     writer.add_scalar('values/deg_diff_mean', deg_diff.mean(), epoch)
+        #     writer.add_scalar('values/deg_std', out_adj.sum(-1).std(), epoch)
+        #     writer.add_scalar('values/deg_mean', out_adj.sum(-1).mean(), epoch)
+
         x = F.dropout(self.conv1(x, adj), training=self.training)
+        if epoch % 1000 == 1000:
+            print('conv1 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
         x = self.conv2(x, adj)
-        return x
+        if epoch % 1000 == 1000:
+            print('conv2 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
+        return x, adj
 
 class GCN_DGG(torch.nn.Module):
     def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs):
@@ -665,6 +685,107 @@ class GCN_DGG(torch.nn.Module):
             writer=writer, epoch=epoch
         )
         return adj
+
+class GCN_DGG_debug(torch.nn.Module):
+    def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs):
+        super(GCN_DGG_debug, self).__init__()
+
+        # GCN layers
+        self.convs = nn.ModuleList()
+        self.conv1 = GCNConv(nfeat, nhidden)
+        self.conv2 = GCNConv(nhidden, nclass)
+        self.convs.append(self.conv1)
+        self.convs.append(self.conv2)
+
+        self.dgg_adj_input = args.dgg_adj_input
+        self.dggs = nn.ModuleList()
+        for _ in range(args.n_dgg_layers):
+            self.dggs.append(
+                DGG_LearnableK_debug(
+                    in_dim=nfeat, latent_dim=nhidden, args=args
+                )
+            )
+
+        self.params1 = list(self.conv1.parameters())
+        self.params2 = list(self.conv2.parameters())
+        self.params2.extend(list(self.dggs.parameters()))
+
+    def normalize_adj(self, A_hat):
+        """
+        renormalisation of adjacency matrix
+        Args:
+            A_hat: adj mat with self loops [N, N]
+
+        Returns:
+            A_hat: renormalized adjaceny [N, N]
+
+        """
+        row_sum = A_hat.sum(-1)
+        row_sum = (row_sum) ** -0.5
+        D = torch.diag(row_sum)
+        A_hat = torch.mm(torch.mm(D, A_hat), D)
+        return A_hat
+
+    def forward(self, x, in_adj, epoch=None, writer=None):
+        """
+        Args:
+            x: node features
+            A: sparse unnormalized adjacency matrix without self loops
+            epoch: epoch number
+            writer: tensorboard summary writer
+
+        Returns:
+            out: class predictions for each node
+        """
+        # add self-loops
+        in_adj = (
+                in_adj.to_dense() +
+                torch.eye(in_adj.shape[0], device=in_adj.device)
+        ).to_sparse()
+
+        # coalesce to track grads
+        unnorm_adj = in_adj.coalesce()
+
+        for i, conv in enumerate(self.convs):
+            if i < len(self.dggs):
+                if self.dgg_adj_input == 'input_adj':
+                    # always use input adjacency
+                    unnorm_adj, debug_dict = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
+                else:
+                    # use updated adjacency
+                    unnorm_adj, debug_dict = self.dgg_net(x, i, unnorm_adj, writer, epoch)
+
+                # convert to dense tensor and normal
+                unnorm_adj = unnorm_adj.to_dense()
+                # if epoch % 1000 == 0:
+                #     print(
+                #         'unnorm adj deg mu: {:.5f} std: {:.5f}'.format(
+                #             unnorm_adj.sum(-1).mean().item(),
+                #             unnorm_adj.sum(-1).std().item()
+                #         ))
+                norm_adj = self.normalize_adj(unnorm_adj)
+
+            x = conv(x, norm_adj)
+
+            if i < len(self.convs) - 1:
+                x = F.dropout(x, training=self.training)
+
+            # if epoch % 1000 == 0:
+            #     print(
+            #         'conv{} mu: {:.5f} std: {:.5f}'.format(
+            #             i + 1, x.mean().item(), x.std().item()
+            #         )
+            #     )
+        return x, debug_dict
+
+    def dgg_net(self, x, i, unnorm_adj, writer, epoch):
+        # learn adjacency (sparse tensor)
+        adj = self.dggs[i](
+            x=x, in_adj=unnorm_adj, noise=self.training,
+            writer=writer, epoch=epoch
+        )
+        return adj
+
 
 
 if __name__ == "__main__":

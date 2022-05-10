@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="cora_gcn_dgg_uvDist_edgePCDF", help="experiment name"
+    "--expname", type=str, default="test", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -52,7 +52,7 @@ parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
 parser.add_argument(
-    "--model", type=str, default='GCN_DGG', help="model name"
+    "--model", type=str, default='GCN_DGG_debug', help="model name"
 )
 parser.add_argument(
     "--edge_noise_level",
