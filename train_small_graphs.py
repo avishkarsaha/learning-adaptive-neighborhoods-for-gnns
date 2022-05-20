@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="test", help="experiment name"
+    "--expname", type=str, default="200522", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -43,7 +43,7 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="cora", help="dateset")
+parser.add_argument("--data", default="citeseer", help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
 parser.add_argument("--lamda", type=float, default=0.5, help="lamda.")
@@ -52,7 +52,7 @@ parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
 parser.add_argument(
-    "--model", type=str, default='GCN_DGG_debug', help="model name"
+    "--model", type=str, default='GCN_DGG', help="model name"
 )
 parser.add_argument(
     "--edge_noise_level",
@@ -312,6 +312,8 @@ if __name__ == "__main__":
 
     # Load data
     if 'DGG' not in args.model:
+        args.pre_normalize_adj = True
+    else:
         args.pre_normalize_adj = True
     adj, features, labels, idx_train, idx_val, idx_test = load_citation(
         args.data, args.root, normalize_adj=args.pre_normalize_adj,

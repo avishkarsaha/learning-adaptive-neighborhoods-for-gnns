@@ -1203,6 +1203,10 @@ class DGG_LearnableK_debug(nn.Module):
         # prepare input featuresfor rest of function
         x = x.unsqueeze(0)  # [1, N, dim]
 
+        print('n edges total', in_adj.to_dense().sum(), len(in_adj.indices()[0]))
+        print('in deg {:.5f} {:.5f}'.format(
+            in_adj.to_dense().sum(-1).mean().item(), in_adj.to_dense().sum(-1).std().item()))
+
         # embed input and adjacency to get initial edge log probabilities
         edge_p = self.edge_prob_net(in_adj, x, mode=self.edge_prob_net_mode)  # [N, N]
         ### this module should determine the likelihood of
@@ -1213,17 +1217,24 @@ class DGG_LearnableK_debug(nn.Module):
         #         edge_p.sum(-1).mean().item(), edge_p.sum(-1).std().item())
         #     )
         # perform rest of forward on dense tensors
+        print('edge p deg {:.5f} {:.5f}'.format(
+            edge_p.sum(-1).mean().item(),
+            edge_p.sum(-1).std().item()))
+
         edge_p = edge_p.unsqueeze(0)                            # [1, N, N]
         # return edge_p  # STEP 0
 
         # add gumbel noise to edge log probabilities
-        # edge_p = edge_p + 1e-8
+        edge_p = edge_p + 1e-8
         log_p = torch.log(edge_p)                               # [1, N, N]
         gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
         pert_log_p = self.perturb_edge_prob(
-            log_p, noise_sample=gumbel_noise, noise=True
+            log_p, noise_sample=gumbel_noise, noise=noise
         )
         pert_edge_p = torch.exp(pert_log_p)                     # [1, N, N]
+        print('pert edge p deg {:.5f} {:.5f}'.format(
+            pert_edge_p.sum(-1).mean().item(),
+            pert_edge_p.sum(-1).std().item()))
 
         # return pert_edge_p   # STEP 1
 
@@ -1255,28 +1266,33 @@ class DGG_LearnableK_debug(nn.Module):
             'out_adj': topk_edge_p  # [1, N, N]
         }
 
-        # register hooks for gradients
-        if self.training:
-            self.var_grads['edge_p'] = []
-            self.var_grads['actual_k'] = []
-            self.var_grads['out_adj'] = []
+        print('out deg {:.5f} {:.5f}'.format(
+            topk_edge_p.sum(-1).mean().item(),
+            topk_edge_p.sum(-1).std().item()))
 
-            edge_p_grad = edge_p.register_hook(
-                lambda grad: self.var_grads['edge_p'].append(grad)
-            )
-            actual_k_grad = top_k.register_hook(
-                lambda grad: self.var_grads['actual_k'].append(grad)
-            )
-            topk_edge_p_grad = topk_edge_p.register_hook(
-                lambda grad: self.var_grads['out_adj'].append(grad)
-            )
-            edge_p.retain_grad()
-            actual_k.retain_grad()
-            topk_edge_p.retain_grad()
+        # register hooks for gradients
+        # if self.training:
+        #     self.var_grads['edge_p'] = []
+        #     self.var_grads['actual_k'] = []
+        #     self.var_grads['out_adj'] = []
+        #
+        #     edge_p_grad = edge_p.register_hook(
+        #         lambda grad: self.var_grads['edge_p'].append(grad)
+        #     )
+        #     actual_k_grad = top_k.register_hook(
+        #         lambda grad: self.var_grads['actual_k'].append(grad)
+        #     )
+        #     topk_edge_p_grad = topk_edge_p.register_hook(
+        #         lambda grad: self.var_grads['out_adj'].append(grad)
+        #     )
+        #     edge_p.retain_grad()
+        #     actual_k.retain_grad()
+        #     topk_edge_p.retain_grad()
 
         if not self.hard:
             # return adjacency matrix with softmax probabilities
-            return topk_edge_p.squeeze(0).to_sparse(), debug_dict
+            # return topk_edge_p.squeeze(0).to_sparse(), debug_dict
+            return topk_edge_p.squeeze(0).to_sparse()
 
         # if hard adj desired, threshold first_k and scatter
         adj_hard = torch.ones_like(adj)
@@ -1336,7 +1352,7 @@ class DGG_LearnableK_debug(nn.Module):
             first_k_log_p = s_edge_p * first_k
 
             # Unsort
-            adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
+            adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=s_edge_p)
             return adj, first_k, k
         elif mode == 'k_times_edge_prob':
             # sort edge probabilities in DESCENDING order
@@ -1356,7 +1372,7 @@ class DGG_LearnableK_debug(nn.Module):
 
             # Unsort
             adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
-            return adj, first_k
+            return adj, first_k, torch.tensor(0)
 
         elif mode == 'k_only':
             # sort edge probabilities in DESCENDING order
@@ -1369,7 +1385,7 @@ class DGG_LearnableK_debug(nn.Module):
 
             # Unsort
             adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
-            return adj, first_k
+            return adj, first_k, torch.tensor(0)
 
         # k_only with linear gradients (instead of tanh saturating grads)
         elif mode == 'k_only_w_linear_grad':
@@ -1548,11 +1564,15 @@ class DGG_LearnableK_debug(nn.Module):
             # get edge end features
             u = x[:, in_adj.indices()[0, :]]  # [1, n, dim]
             v = x[:, in_adj.indices()[1, :]]  # [1, n, dim]
+            print('n edges', u.shape[1])
 
             # distance
+            t = -1.0    # this t parameter makes a significant difference
             dist = torch.linalg.vector_norm(u - v, dim=-1, ord=2)
-            edge_prob = torch.exp(-8.0 * dist).squeeze(0)   # [n, n]
-            # edge_prob = edge_prob * in_adj.to_dense()
+            print('dist edge p {:.5f} {:.5f}'.format(
+                dist.mean().item(),
+                dist.std().item()))
+            edge_prob = torch.exp(t * dist).squeeze(0)   # [n, n]
 
             # convert into to sparse and then into dense
             z = torch.sparse.FloatTensor(in_adj.indices(), edge_prob, in_adj.shape)

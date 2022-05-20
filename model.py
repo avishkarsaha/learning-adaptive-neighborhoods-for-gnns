@@ -520,6 +520,10 @@ class GCN(torch.nn.Module):
         self.params2 = list(self.conv2.parameters())
 
     def normalize_adj(self, A):
+        # assert no self loops
+        assert A[torch.arange(len(A)), torch.arange(len(A))].sum() == 0
+
+        # add self loops
         A_hat = A + torch.eye(A.size(0), device=A.device)
         D = torch.diag(torch.sum(A_hat, 1))
         D = D.inverse().sqrt()
@@ -539,8 +543,21 @@ class GCN(torch.nn.Module):
         """
         adj = adj.to_dense()
         adj = self.normalize_adj(adj)
+
         x = F.dropout(self.conv1(x, adj), training=self.training)
+        if writer is not None:
+            writer.add_histogram('gcn_conv1_dist', x, epoch)
+            print(
+                'conv1 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item())
+            )
+
         x = self.conv2(x, adj)
+        if writer is not None:
+            writer.add_histogram('gcn_conv2_dist', x, epoch)
+            print(
+                'conv2 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item())
+            )
+
         out = F.log_softmax(x, dim=-1)
         return out
 
@@ -586,10 +603,10 @@ class GCN_debug(torch.nn.Module):
         #     writer.add_scalar('values/deg_mean', out_adj.sum(-1).mean(), epoch)
 
         x = F.dropout(self.conv1(x, adj), training=self.training)
-        if epoch % 1000 == 1000:
+        if epoch % 10 == 0:
             print('conv1 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
         x = self.conv2(x, adj)
-        if epoch % 1000 == 1000:
+        if epoch % 10 == 0:
             print('conv2 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
         return x, adj
 
@@ -633,6 +650,21 @@ class GCN_DGG(torch.nn.Module):
         A_hat = torch.mm(torch.mm(D, A_hat), D)
         return A_hat
 
+    def normalize_adj_gcn(self, A_hat):
+        """
+        renormalisation of adjacency matrix
+        Args:
+            A_hat: adj mat with self loops [N, N]
+
+        Returns:
+            A_hat: renormalized adjaceny [N, N]
+
+        """
+        D = torch.diag(torch.sum(A_hat, 1))
+        D = D.inverse().sqrt()
+        A_hat = torch.mm(torch.mm(D, A_hat), D)
+        return A_hat
+
     def forward(self, x, in_adj, epoch=None, writer=None):
         """
         Args:
@@ -644,12 +676,21 @@ class GCN_DGG(torch.nn.Module):
         Returns:
             out: class predictions for each node
         """
+        print('n edges total 00', in_adj.to_dense().sum())
         # add self-loops
         in_adj = (
                 in_adj.to_dense() +
                 torch.eye(in_adj.shape[0], device=in_adj.device)
         ).to_sparse()
 
+        if epoch == 0:
+            diagonal_w = in_adj.to_dense()[
+                             torch.arange(in_adj.shape[0]), torch.arange(in_adj.shape[0])
+                         ] / in_adj.to_dense().sum(-1)
+
+            print('in diag w {:.5f} {:.5f}'.format(
+                diagonal_w.mean().item(), diagonal_w.std().item()
+            ))
         # coalesce to track grads
         unnorm_adj = in_adj.coalesce()
 
@@ -662,9 +703,25 @@ class GCN_DGG(torch.nn.Module):
                     # use updated adjacency
                     unnorm_adj = self.dgg_net(x, i, unnorm_adj, writer, epoch)
                 norm_adj = self.normalize_adj(unnorm_adj.to_dense())
+
+            diagonal_w = norm_adj[
+                             torch.arange(norm_adj.shape[0]), torch.arange(
+                                 norm_adj.shape[0])
+                         ] / norm_adj.sum(-1)
+            print('out diag w {:.5f} {:.5f}'.format(
+                diagonal_w.mean().item(), diagonal_w.std().item()))
+
             x = conv(x, norm_adj)
+
             if i < len(self.convs) - 1:
                 x = F.dropout(x, training=self.training)
+
+            if writer is not None:
+                writer.add_histogram('gcn_conv{}_dist'.format(i + 1), x, epoch)
+                print(
+                    'conv{} mu: {:.5f} std: {:.5f}'.format(i + 1, x.mean().item(),
+                                                          x.std().item())
+                )
 
         out = F.log_softmax(x, dim=-1)
 
@@ -776,7 +833,8 @@ class GCN_DGG_debug(torch.nn.Module):
             #             i + 1, x.mean().item(), x.std().item()
             #         )
             #     )
-        return x, debug_dict
+        # return x, debug_dict
+        return x
 
     def dgg_net(self, x, i, unnorm_adj, writer, epoch):
         # learn adjacency (sparse tensor)

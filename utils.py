@@ -154,15 +154,39 @@ def load_citation(dataset_str, root, normalize_adj=False, noise=0.0):
     idx_val = torch.LongTensor(idx_val)
     idx_test = torch.LongTensor(idx_test)
 
+    # zero out self loops if there are any (these will be added in the network)
+    adj.setdiag(np.zeros(adj.shape[0]), k=0)
+    assert adj.diagonal().sum() == 0
+
     # add noise (optional)
     if noise > 0.0:
         adj = add_noisy_edges(adj, noise_level=noise)
 
+
     # normalize adjacency if not using DGG
     if normalize_adj:
-        adj = sys_normalized_adjacency(adj)
+        adj = sys_normalized_adjacency(adj) # adds self loops and normalises
+
     adj = sparse_mx_to_torch_sparse_tensor(adj)
+
+    # norm_adj = sys_normalized_adjacency(adj)    # adds self loops and normalises
+    # norm_adj = sparse_mx_to_torch_sparse_tensor(norm_adj)
+    #
+    #
+    # norm_adj_gcn = normalize_adj_gcn(adj.to_dense())
+    # norm_norm_adj_gcn = normalize_adj_gcn(norm_adj.to_dense())
+
     return adj, features, labels, idx_train, idx_val, idx_test
+
+
+def normalize_adj_gcn(A):
+    # add self loops
+    A_hat = A + torch.eye(A.size(0))
+    D = torch.diag(torch.sum(A_hat, 1))
+    D = D.inverse().sqrt()
+    A_hat = torch.mm(torch.mm(D, A_hat), D)
+    return A_hat
+
 
 
 # adapted from PetarV/GAT
