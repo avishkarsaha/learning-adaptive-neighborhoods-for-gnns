@@ -554,9 +554,9 @@ class GCN(torch.nn.Module):
         x = self.conv2(x, adj)
         if writer is not None:
             writer.add_histogram('gcn_conv2_dist', x, epoch)
-            print(
-                'conv2 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item())
-            )
+            # print(
+            #     'conv2 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item())
+            # )
 
         out = F.log_softmax(x, dim=-1)
         return out
@@ -676,13 +676,13 @@ class GCN_DGG(torch.nn.Module):
         Returns:
             out: class predictions for each node
         """
-        print('n edges total 00', in_adj.to_dense().sum())
+        # print('n edges before self loops', in_adj.to_dense().sum())
         # add self-loops
         in_adj = (
                 in_adj.to_dense() +
                 torch.eye(in_adj.shape[0], device=in_adj.device)
         ).to_sparse()
-
+        # print('n edges with self loops', in_adj.to_dense().sum())
         if epoch == 0:
             diagonal_w = in_adj.to_dense()[
                              torch.arange(in_adj.shape[0]), torch.arange(in_adj.shape[0])
@@ -708,8 +708,8 @@ class GCN_DGG(torch.nn.Module):
                              torch.arange(norm_adj.shape[0]), torch.arange(
                                  norm_adj.shape[0])
                          ] / norm_adj.sum(-1)
-            print('out diag w {:.5f} {:.5f}'.format(
-                diagonal_w.mean().item(), diagonal_w.std().item()))
+            # print('out diag w {:.5f} {:.5f}'.format(
+            #     diagonal_w.mean().item(), diagonal_w.std().item()))
 
             x = conv(x, norm_adj)
 
@@ -718,10 +718,10 @@ class GCN_DGG(torch.nn.Module):
 
             if writer is not None:
                 writer.add_histogram('gcn_conv{}_dist'.format(i + 1), x, epoch)
-                print(
-                    'conv{} mu: {:.5f} std: {:.5f}'.format(i + 1, x.mean().item(),
-                                                          x.std().item())
-                )
+                # print(
+                #     'conv{} mu: {:.5f} std: {:.5f}'.format(i + 1, x.mean().item(),
+                #                                           x.std().item())
+                # )
 
         out = F.log_softmax(x, dim=-1)
 

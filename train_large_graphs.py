@@ -333,15 +333,16 @@ if __name__ == "__main__":
 
     # Load data
     if 'DGG' not in args.model:
-        args.pre_normalize_adj = True
+        args.pre_normalize_adj = False
     train_adj, val_adj, test_adj, train_feat, val_feat, test_feat, \
     train_labels, val_labels, test_labels, train_nodes, val_nodes, \
     test_nodes = load_ppi_from_disk(normalize_adj=args.pre_normalize_adj)
-    cudaid = "cuda"
-    device = torch.device(cudaid)
 
     idx = torch.LongTensor(range(20))
     loader = Data.DataLoader(dataset=idx, batch_size=1, shuffle=True, num_workers=0)
+
+    cudaid = "cuda"
+    device = torch.device(cudaid)
 
     # Load model
     model = models.__dict__[args.model](

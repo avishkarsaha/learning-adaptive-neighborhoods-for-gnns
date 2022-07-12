@@ -24,7 +24,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="200522", help="experiment name"
+    "--expname", type=str, default="050722_citesser_gcn_noise0.05", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -52,12 +52,12 @@ parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
 parser.add_argument(
-    "--model", type=str, default='GCN_DGG', help="model name"
+    "--model", type=str, default='GCN', help="model name"
 )
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.0,
+    default=0.0005,
     help="percentage of noisy edges to add",
 )
 # Differentiable graph generator specific
@@ -312,9 +312,9 @@ if __name__ == "__main__":
 
     # Load data
     if 'DGG' not in args.model:
-        args.pre_normalize_adj = True
+        args.pre_normalize_adj = False
     else:
-        args.pre_normalize_adj = True
+        args.pre_normalize_adj = False
     adj, features, labels, idx_train, idx_val, idx_test = load_citation(
         args.data, args.root, normalize_adj=args.pre_normalize_adj,
         noise=args.edge_noise_level
