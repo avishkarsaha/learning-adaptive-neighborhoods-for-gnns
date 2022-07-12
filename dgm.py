@@ -15,6 +15,7 @@ def sample_gumbel_from_uniform(shape, eps=1e-20):
         U = U.cuda()
     return -torch.log(-torch.log(U + eps) + eps)
 
+
 def gumbel_sample(logits, noise_sample):
     """Draw a sample from the Gumbel-Softmax distribution
     Args:
@@ -31,6 +32,7 @@ def gumbel_sample(logits, noise_sample):
     noise = noise_sample * zero_self_loops
     y = logits + noise_sample
     return y
+
 
 def straight_through_gumbel_softmax(
     logits, temperature, hard=False, self_loops_noise=False
@@ -295,10 +297,7 @@ class DGG_LearnableK_SDD(nn.Module):
         if noise:
             # During training sample from Gumbel Softmax [B, N, N]
             edge_prob = torch.stack(
-                [
-                    gumbel_sample(batch, temp, self.self_loops_noise)
-                    for batch in log_p
-                ]
+                [gumbel_sample(batch, temp, self.self_loops_noise) for batch in log_p]
             )
         else:
             edge_prob = F.softmax(log_p / temp, dim=-1)
@@ -471,10 +470,7 @@ class DGG_LearnableK_Small(nn.Module):
         if noise:
             # During training sample from Gumbel Softmax [B, N, N]
             edge_prob = torch.stack(
-                [
-                    gumbel_sample(batch, temp, self.self_loops_noise)
-                    for batch in log_p
-                ]
+                [gumbel_sample(batch, temp, self.self_loops_noise) for batch in log_p]
             )
         else:
             edge_prob = F.softmax(log_p / temp, dim=-1)
@@ -635,10 +631,7 @@ class DGG_LearnableK_old(nn.Module):
         if noise:
             # During training sample from Gumbel Softmax [B, N, N]
             edge_prob = torch.stack(
-                [
-                    gumbel_sample(batch, temp, self.self_loops_noise)
-                    for batch in log_p
-                ]
+                [gumbel_sample(batch, temp, self.self_loops_noise) for batch in log_p]
             )
         else:
             edge_prob = F.softmax(log_p / temp, dim=-1)
@@ -757,7 +750,6 @@ class DGG_LearnableK(nn.Module):
         # Learnable K
         self.register_buffer("k_bias", torch.tensor(k_bias))
 
-
         # Option 3, use projected input to get mu, var in latent dim and
         # then project down to 1
         self.k_net = LearnableKEncoder(in_dim=3, latent_dim=3)
@@ -779,7 +771,7 @@ class DGG_LearnableK(nn.Module):
         Returns:
             adj: adjacency matrix [N, N]
         """
-        assert x.ndim ==  2
+        assert x.ndim == 2
         assert len(in_adj.shape) == 2
 
         # get number of nodes
@@ -790,25 +782,25 @@ class DGG_LearnableK(nn.Module):
 
         # embed input and adjacency to get initial edge log probabilities
         edge_p_mode = None
-        edge_p = self.edge_prob_net(in_adj, x, mode=edge_p_mode)    # [N, N]
-        edge_p = edge_p.to_dense().unsqueeze(0)                         # [1, N, N]
-        edge_p = F.relu(edge_p)     # keep edge probabilities positive
-        return edge_p   # STEP 0
+        edge_p = self.edge_prob_net(in_adj, x, mode=edge_p_mode)  # [N, N]
+        edge_p = edge_p.to_dense().unsqueeze(0)  # [1, N, N]
+        edge_p = F.relu(edge_p)  # keep edge probabilities positive
+        return edge_p  # STEP 0
 
         # add gumbel noise to edge log probabilities
         edge_p = edge_p + 1e-8
-        log_p = torch.log(edge_p)    # [1, N, N]
+        log_p = torch.log(edge_p)  # [1, N, N]
         gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
 
-        noise_mode = 'everywhere'
-        if noise_mode == 'non_edges':
+        noise_mode = "everywhere"
+        if noise_mode == "non_edges":
             # only keep noise on non edges
             mask = 1 - in_adj.to_dense()
             gumbel_noise = gumbel_noise * mask
             gumbel_noise = torch.clamp(gumbel_noise, max=0.5)
-        elif noise_mode == 'positive':
+        elif noise_mode == "positive":
             gumbel_noise = torch.clamp(gumbel_noise, min=0, max=1)
-        elif noise_mode == 'everywhere':
+        elif noise_mode == "everywhere":
             pass
 
         pert_log_p = self.perturb_edge_prob(
@@ -819,11 +811,11 @@ class DGG_LearnableK(nn.Module):
 
         # get smooth top-k
         k, log_k = self.k_estimate_net(
-            N, in_adj, x, mode='learn_normalized_degree_relu'
-        )    # [1, N, 1]
+            N, in_adj, x, mode="learn_normalized_degree_relu"
+        )  # [1, N, 1]
         if writer is not None:
-            writer.add_scalar('values/k_std', log_k.std(), epoch)
-            writer.add_scalar('values/k_mean', log_k.mean(), epoch)
+            writer.add_scalar("values/k_std", log_k.std(), epoch)
+            writer.add_scalar("values/k_mean", log_k.mean(), epoch)
 
         # register hooks for gradients
         if self.training:
@@ -833,13 +825,12 @@ class DGG_LearnableK(nn.Module):
 
         # select top_k
         topk_edge_p, top_k = self.select_top_k(
-            N, k, pert_edge_p, mode='k_only',
-            writer=writer, epoch=epoch
+            N, k, pert_edge_p, mode="k_only", writer=writer, epoch=epoch
         )
 
         if writer is not None:
-            writer.add_scalar('values/first_k_std', top_k.sum(-1).std(), epoch)
-            writer.add_scalar('values/first_k_mean', top_k.sum(-1).mean(), epoch)
+            writer.add_scalar("values/first_k_std", top_k.sum(-1).std(), epoch)
+            writer.add_scalar("values/first_k_mean", top_k.sum(-1).mean(), epoch)
 
         if not self.hard:
             # return adjacency matrix with softmax probabilities
@@ -875,20 +866,21 @@ class DGG_LearnableK(nn.Module):
         return adj_hard, k
 
     def select_top_k(
-            self, N, k, pert_edge_p, mode='k_times_edge_prob',
-            writer=None, epoch=None
+        self, N, k, pert_edge_p, mode="k_times_edge_prob", writer=None, epoch=None
     ):
-        if mode == 'k_times_edge_prob':
+        if mode == "k_times_edge_prob":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
             if writer is not None:
-                writer.add_scalar('values/edge_p_std', s_edge_p.sum(-1).std(), epoch)
-                writer.add_scalar('values/edge_p_mean', s_edge_p.sum(-1).mean(), epoch)
+                writer.add_scalar("values/edge_p_std", s_edge_p.sum(-1).std(), epoch)
+                writer.add_scalar("values/edge_p_mean", s_edge_p.sum(-1).mean(), epoch)
 
             t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
             w = 1  # sharpness parameter
-            first_k = 1 - 0.5 * (1 + torch.tanh((t - k) / w))  # higher k = more items closer to 1
+            first_k = 1 - 0.5 * (
+                1 + torch.tanh((t - k) / w)
+            )  # higher k = more items closer to 1
 
             # Multiply sorted edge log probabilities by first-k and then softmax
             first_k_log_p = s_edge_p * first_k
@@ -897,20 +889,22 @@ class DGG_LearnableK(nn.Module):
             adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
             return adj, first_k
 
-        elif mode == 'k_only':
+        elif mode == "k_only":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
             t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
             w = 1  # sharpness parameter
-            first_k = 1 - 0.5 * (1 + torch.tanh((t - k) / w))  # higher k = more items closer to 1
+            first_k = 1 - 0.5 * (
+                1 + torch.tanh((t - k) / w)
+            )  # higher k = more items closer to 1
 
             # Unsort
             adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
             return adj, first_k
 
         # k_only with linear gradients (instead of tanh saturating grads)
-        elif mode == 'k_only_w_linear_grad':
+        elif mode == "k_only_w_linear_grad":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
@@ -926,7 +920,7 @@ class DGG_LearnableK(nn.Module):
             return adj, first_k
 
         # k_only with linear gradients (instead of tanh saturating grads)
-        elif mode == 'k_times_edge_prob_w_linear_grad':
+        elif mode == "k_times_edge_prob_w_linear_grad":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
@@ -945,11 +939,11 @@ class DGG_LearnableK(nn.Module):
             adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
             return adj, first_k_log_p
 
-    def k_estimate_net(self, N, in_adj, x, mode='calculate'):
-        if mode == 'calculate':
+    def k_estimate_net(self, N, in_adj, x, mode="calculate"):
+        if mode == "calculate":
             in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
             k = (in_degree / N) * 2 - 1
-        elif mode == 'learn':
+        elif mode == "learn":
             in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
             degree = F.leaky_relu(self.input_degree_project(in_degree))  # [1, N, dim]
 
@@ -964,18 +958,18 @@ class DGG_LearnableK(nn.Module):
 
             # Keep k between -1 and 1
             k = torch.tanh(log_k)
-        elif mode == 'project_degree':
+        elif mode == "project_degree":
             in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
             in_degree = (in_degree / N) * 2 - 1
             degree = self.input_degree_project(in_degree)  # [1, N, dim]
             degree = self.input_degree_decode(degree)  # [1, N, 1]
             log_k = degree
             return log_k, degree
-        elif mode == 'fixed':
+        elif mode == "fixed":
             k = torch.ones_like(in_adj.to_dense().sum(-1).reshape(1, -1, 1)) * 0
             k = (k / N) * 2 - 1
             return k, k
-        elif mode == 'project_normalized_degree':
+        elif mode == "project_normalized_degree":
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
             mu = self.deg_mean
@@ -989,7 +983,7 @@ class DGG_LearnableK(nn.Module):
             unnorm_deg = (deg * var) + mu
 
             return unnorm_deg, unnorm_deg
-        elif mode == 'learn_normalized_degree':
+        elif mode == "learn_normalized_degree":
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
             mu = self.deg_mean
@@ -1004,7 +998,7 @@ class DGG_LearnableK(nn.Module):
 
             return unnorm_deg, unnorm_deg
 
-        elif mode == 'learn_normalized_degree_v2':
+        elif mode == "learn_normalized_degree_v2":
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
             mu = in_deg.mean()
@@ -1019,7 +1013,7 @@ class DGG_LearnableK(nn.Module):
 
             return unnorm_deg, unnorm_deg
 
-        elif mode == 'learn_normalized_degree_relu':
+        elif mode == "learn_normalized_degree_relu":
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
             mu = self.deg_mean
@@ -1049,11 +1043,11 @@ class DGG_LearnableK(nn.Module):
 
     def edge_prob_net(self, in_adj, x, mode=None):
         """
-        
+
         Args:
             in_adj: [N, N]
             x: [1, N, dim]
-            mode: 
+            mode:
 
         Returns:
 
@@ -1066,23 +1060,23 @@ class DGG_LearnableK(nn.Module):
             z = self.input_adj_project(u_v).flatten()  # [n]
             z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z_matrix
-        elif mode == 'pass':
+        elif mode == "pass":
             # for debugging purposes
             z_matrix = torch.sparse.FloatTensor(
                 in_adj.indices(), in_adj.values(), in_adj.shape
             )
             return z_matrix
-        elif mode == 'project_adj':
+        elif mode == "project_adj":
             auv = in_adj.values().unsqueeze(-1)  # [n, 1]
             z = self.adj_project(auv).flatten()  # [n]
             z_matrix = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z_matrix
-        elif mode == 'project_adj_dense':
+        elif mode == "project_adj_dense":
             auv = in_adj.unsqueeze(-1)  # [N, N, 1]
             z_matrix = self.adj_project(auv).squeeze(-1).unsqueeze(0)  # [1, N, N]
             return z_matrix
         else:
-            raise Exception('mode not found')
+            raise Exception("mode not found")
 
 
 class DGG_LearnableK_debug(nn.Module):
@@ -1091,12 +1085,7 @@ class DGG_LearnableK_debug(nn.Module):
     for varying number of input nodes (N)
     """
 
-    def __init__(
-            self,
-            in_dim=32,
-            latent_dim=64,
-            args=None
-    ):
+    def __init__(self, in_dim=32, latent_dim=64, args=None):
         super(DGG_LearnableK_debug, self).__init__()
 
         # torch.manual_seed(0)
@@ -1145,11 +1134,12 @@ class DGG_LearnableK_debug(nn.Module):
         )
         self.k_W = nn.Parameter(torch.rand(latent_dim, latent_dim, requires_grad=True))
 
-        if self.k_net_mode == 'input_deg':
+        if self.k_net_mode == "input_deg":
             self.k_net = LearnableKEncoder(in_dim=3, latent_dim=latent_dim // 4)
         else:
-            self.k_net = LearnableKEncoder(in_dim=latent_dim // 2, latent_dim=latent_dim // 4)
-
+            self.k_net = LearnableKEncoder(
+                in_dim=latent_dim // 2, latent_dim=latent_dim // 4
+            )
 
         # Top-k selector
         self.k_select_mode = args.dgg_mode_k_select
@@ -1159,11 +1149,7 @@ class DGG_LearnableK_debug(nn.Module):
             loc=torch.tensor(0.0), scale=torch.tensor(0.3)
         )
 
-        self.var_grads = {
-            'edge_p': [],
-            'first_k': [],
-            'out_adj': []
-        }
+        self.var_grads = {"edge_p": [], "first_k": [], "out_adj": []}
 
     def hook(self, grad):
         # grad = torch.clamp(grad, min=-0.05, max=0.05)
@@ -1221,17 +1207,17 @@ class DGG_LearnableK_debug(nn.Module):
         #     edge_p.sum(-1).mean().item(),
         #     edge_p.sum(-1).std().item()))
 
-        edge_p = edge_p.unsqueeze(0)                            # [1, N, N]
+        edge_p = edge_p.unsqueeze(0)  # [1, N, N]
         # return edge_p  # STEP 0
 
         # add gumbel noise to edge log probabilities
         edge_p = edge_p + 1e-8
-        log_p = torch.log(edge_p)                               # [1, N, N]
+        log_p = torch.log(edge_p)  # [1, N, N]
         gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
         pert_log_p = self.perturb_edge_prob(
             log_p, noise_sample=gumbel_noise, noise=noise
         )
-        pert_edge_p = torch.exp(pert_log_p)                     # [1, N, N]
+        pert_edge_p = torch.exp(pert_log_p)  # [1, N, N]
         # print('pert edge p deg {:.5f} {:.5f}'.format(
         #     pert_edge_p.sum(-1).mean().item(),
         #     pert_edge_p.sum(-1).std().item()))
@@ -1250,20 +1236,19 @@ class DGG_LearnableK_debug(nn.Module):
 
         # select top_k
         topk_edge_p, top_k, actual_k = self.select_top_k(
-            N, k, pert_edge_p, mode=self.k_select_mode,
-            writer=writer, epoch=epoch
-        )   # [1, N, N]
+            N, k, pert_edge_p, mode=self.k_select_mode, writer=writer, epoch=epoch
+        )  # [1, N, N]
         if writer is not None:
-            writer.add_scalar('values/first_k_std', top_k.sum(-1).std(), epoch)
-            writer.add_scalar('values/first_k_mean', top_k.sum(-1).mean(), epoch)
+            writer.add_scalar("values/first_k_std", top_k.sum(-1).std(), epoch)
+            writer.add_scalar("values/first_k_mean", top_k.sum(-1).mean(), epoch)
         # if epoch % 1 == 0:
         #     print('first_k mu: {:.4f} std: {:.4f}'.format(
         #         top_k.sum(-1).mean().item(), top_k.sum(-1).std().item())
         #     )
         debug_dict = {
-            'edge_p': edge_p,       # [1, N, N]
-            'first_k': top_k,       # [1, N, N]
-            'out_adj': topk_edge_p  # [1, N, N]
+            "edge_p": edge_p,  # [1, N, N]
+            "first_k": top_k,  # [1, N, N]
+            "out_adj": topk_edge_p,  # [1, N, N]
         }
 
         # print('out deg {:.5f} {:.5f}'.format(
@@ -1305,8 +1290,7 @@ class DGG_LearnableK_debug(nn.Module):
         return adj_hard, k
 
     def select_top_k(
-            self, N, k, pert_edge_p, mode='k_times_edge_prob',
-            writer=None, epoch=None
+        self, N, k, pert_edge_p, mode="k_times_edge_prob", writer=None, epoch=None
     ):
         """
 
@@ -1321,32 +1305,33 @@ class DGG_LearnableK_debug(nn.Module):
         Returns:
 
         """
-        if mode == 'edge_p-cdf':
+        if mode == "edge_p-cdf":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
             # cumsum
             N = s_edge_p.shape[-1]
-            s_e_cumsum = s_edge_p.cumsum(-1)            # [1, N, N]
+            s_e_cumsum = s_edge_p.cumsum(-1)  # [1, N, N]
             s_e_cumsum = s_e_cumsum / N
 
             # downsample to specific size
-            s_e_cumsum_ds = F.interpolate(s_e_cumsum, size=[256], mode='linear')
+            s_e_cumsum_ds = F.interpolate(s_e_cumsum, size=[256], mode="linear")
             e_k = self.signal_project(s_e_cumsum_ds)  # [1, N, 1]
             e_k = torch.sigmoid(e_k)
 
             k = e_k * N
 
             if writer is not None:
-                writer.add_scalar('values/edge_p_std', s_edge_p.sum(-1).std(), epoch)
-                writer.add_scalar('values/edge_p_mean', s_edge_p.sum(-1).mean(), epoch)
-                writer.add_scalar('values/k_std', k.std(), epoch)
-                writer.add_scalar('values/k_mean', k.mean(), epoch)
+                writer.add_scalar("values/edge_p_std", s_edge_p.sum(-1).std(), epoch)
+                writer.add_scalar("values/edge_p_mean", s_edge_p.sum(-1).mean(), epoch)
+                writer.add_scalar("values/k_std", k.std(), epoch)
+                writer.add_scalar("values/k_mean", k.mean(), epoch)
 
             t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
             w = 1  # sharpness parameter
-            first_k = 1 - 0.5 * (1 + torch.tanh(
-                (t - k) / w))  # higher k = more items closer to 1
+            first_k = 1 - 0.5 * (
+                1 + torch.tanh((t - k) / w)
+            )  # higher k = more items closer to 1
 
             # Multiply sorted edge log probabilities by first-k and then softmax
             first_k_log_p = s_edge_p * first_k
@@ -1354,18 +1339,19 @@ class DGG_LearnableK_debug(nn.Module):
             # Unsort
             adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=s_edge_p)
             return adj, first_k, k
-        elif mode == 'k_times_edge_prob':
+        elif mode == "k_times_edge_prob":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
             if writer is not None:
-                writer.add_scalar('values/edge_p_std', s_edge_p.sum(-1).std(), epoch)
-                writer.add_scalar('values/edge_p_mean', s_edge_p.sum(-1).mean(), epoch)
+                writer.add_scalar("values/edge_p_std", s_edge_p.sum(-1).std(), epoch)
+                writer.add_scalar("values/edge_p_mean", s_edge_p.sum(-1).mean(), epoch)
 
             t = torch.arange(N).reshape(1, 1, -1).cuda()  # base domain
             w = 1  # sharpness parameter
-            first_k = 1 - 0.5 * (1 + torch.tanh(
-                (t - k) / w))  # higher k = more items closer to 1
+            first_k = 1 - 0.5 * (
+                1 + torch.tanh((t - k) / w)
+            )  # higher k = more items closer to 1
 
             # Multiply sorted edge log probabilities by first-k and then softmax
             first_k_log_p = s_edge_p * first_k
@@ -1374,21 +1360,22 @@ class DGG_LearnableK_debug(nn.Module):
             adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
             return adj, first_k, torch.tensor(0)
 
-        elif mode == 'k_only':
+        elif mode == "k_only":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
             t = torch.arange(N, device=s_edge_p.device).reshape(1, 1, -1)  # base domain
             w = 1  # sharpness parameter
-            first_k = 1 - 0.5 * (1 + torch.tanh(
-                (t - k) / w))  # higher k = more items closer to 1
+            first_k = 1 - 0.5 * (
+                1 + torch.tanh((t - k) / w)
+            )  # higher k = more items closer to 1
 
             # Unsort
             adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
             return adj, first_k, torch.tensor(0)
 
         # k_only with linear gradients (instead of tanh saturating grads)
-        elif mode == 'k_only_w_linear_grad':
+        elif mode == "k_only_w_linear_grad":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
@@ -1404,7 +1391,7 @@ class DGG_LearnableK_debug(nn.Module):
             return adj, first_k
 
         # k_only with linear gradients (instead of tanh saturating grads)
-        elif mode == 'k_times_edge_prob_w_linear_grad':
+        elif mode == "k_times_edge_prob_w_linear_grad":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
 
@@ -1423,7 +1410,7 @@ class DGG_LearnableK_debug(nn.Module):
             adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
             return adj, first_k_log_p
 
-    def k_estimate_net(self, N, in_adj, x, edge_p, mode='calculate'):
+    def k_estimate_net(self, N, in_adj, x, edge_p, mode="calculate"):
         """
 
         Args:
@@ -1436,13 +1423,13 @@ class DGG_LearnableK_debug(nn.Module):
         Returns:
 
         """
-        if mode == 'pass':
+        if mode == "pass":
             return None, None
-        elif mode == 'calculate':
+        elif mode == "calculate":
             in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
             k = (in_degree / N) * 2 - 1
 
-        elif mode == 'learn_normalized_degree':
+        elif mode == "learn_normalized_degree":
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
             mu = in_deg.mean()
@@ -1457,7 +1444,7 @@ class DGG_LearnableK_debug(nn.Module):
 
             return unnorm_deg, unnorm_deg
 
-        elif mode == 'input_deg':
+        elif mode == "input_deg":
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
 
             mu = self.deg_mean
@@ -1476,21 +1463,21 @@ class DGG_LearnableK_debug(nn.Module):
 
             return unnorm_deg, unnorm_deg
 
-        elif mode == 'gcn-x-deg':
+        elif mode == "gcn-x-deg":
             unnorm_adj_dense = in_adj.to_dense()
 
             # encode node features
-            x = self.node_encode_for_k(x)                       #[1, N, dim]
+            x = self.node_encode_for_k(x)  # [1, N, dim]
 
             # normalize adjacency for GCN
             norm_adj = self.normalize_adj(unnorm_adj_dense)
-            norm_adj = norm_adj.unsqueeze(0)                    # [1, N, N]
+            norm_adj = norm_adj.unsqueeze(0)  # [1, N, N]
 
             # get local node feature by message-passing with neighbours
-            x = norm_adj @ x @ self.k_W       #[1, N, dim]
+            x = norm_adj @ x @ self.k_W  # [1, N, dim]
             x = torch.relu(x)
 
-            in_deg = unnorm_adj_dense.sum(-1).reshape(1, -1, 1) # [1, N, 1]
+            in_deg = unnorm_adj_dense.sum(-1).reshape(1, -1, 1)  # [1, N, 1]
             mu = in_deg.mean()
             var = in_deg.std()
             norm_deg = (in_deg - mu) / (var + 1e-5)
@@ -1510,13 +1497,13 @@ class DGG_LearnableK_debug(nn.Module):
 
             return unnorm_deg, unnorm_deg
 
-        elif mode == 'x':
+        elif mode == "x":
             unnorm_adj_dense = in_adj.to_dense()
 
             # encode node features
-            x = self.node_encode_for_k(x)                       #[1, N, dim]
+            x = self.node_encode_for_k(x)  # [1, N, dim]
 
-            in_deg = unnorm_adj_dense.sum(-1).reshape(1, -1, 1) # [1, N, 1]
+            in_deg = unnorm_adj_dense.sum(-1).reshape(1, -1, 1)  # [1, N, 1]
             mu = in_deg.mean()
             var = in_deg.std()
             norm_deg = (in_deg - mu) / (var + 1e-5)
@@ -1555,10 +1542,10 @@ class DGG_LearnableK_debug(nn.Module):
         Returns:
 
         """
-        if mode == 'u-v-dist':
+        if mode == "u-v-dist":
             # print('input x mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
             # embed node features to lower dimension
-            x = self.node_encode_for_edges(x) # [1, N, dim]
+            x = self.node_encode_for_edges(x)  # [1, N, dim]
             # print('embed x mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
 
             # get edge end features
@@ -1567,19 +1554,19 @@ class DGG_LearnableK_debug(nn.Module):
             # print('n edges', u.shape[1])
 
             # distance
-            t = -1.0    # this t parameter makes a significant difference
+            t = -1.0  # this t parameter makes a significant difference
             dist = torch.linalg.vector_norm(u - v, dim=-1, ord=2)
             # print('dist edge p {:.5f} {:.5f}'.format(
             #     dist.mean().item(),
             #     dist.std().item()))
-            edge_prob = torch.exp(t * dist).squeeze(0)   # [n, n]
+            edge_prob = torch.exp(t * dist).squeeze(0)  # [n, n]
 
             # convert into to sparse and then into dense
             z = torch.sparse.FloatTensor(in_adj.indices(), edge_prob, in_adj.shape)
             return z.to_dense()
-        elif mode == 'u-v-A_uv':
+        elif mode == "u-v-A_uv":
             # embed node features to lower dimension
-            x = self.node_encode_for_edges(x) # [1, N, dim]
+            x = self.node_encode_for_edges(x)  # [1, N, dim]
 
             # get edge end features
             u = x[:, in_adj.indices()[0, :]]  # [1, n, dim]
@@ -1594,9 +1581,9 @@ class DGG_LearnableK_debug(nn.Module):
             # convert into to sparse and then into dense
             z = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z.to_dense()
-        elif mode == 'u-v-deg':
+        elif mode == "u-v-deg":
             # embed node features to lower dimension
-            x = self.node_encode_for_edges(x) # [1, N, dim]
+            x = self.node_encode_for_edges(x)  # [1, N, dim]
 
             # get edge end features
             u = x[:, in_adj.indices()[0, :]]  # [1, n, dim]
@@ -1609,7 +1596,9 @@ class DGG_LearnableK_debug(nn.Module):
             u_deg = deg[:, in_adj.indices()[0, :]]
             v_deg = deg[:, in_adj.indices()[1, :]]
 
-            edge_feat = torch.concat([u, v, u_deg, v_deg], dim=-1)  # [1, n, dim + dim + 2]
+            edge_feat = torch.concat(
+                [u, v, u_deg, v_deg], dim=-1
+            )  # [1, n, dim + dim + 2]
 
             # edge probabilities
             z = self.edge_encode(edge_feat).flatten()  # [n]
@@ -1618,9 +1607,9 @@ class DGG_LearnableK_debug(nn.Module):
             # convert into to sparse and then into dense
             z = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z.to_dense()
-        elif mode == 'edge_conv':
+        elif mode == "edge_conv":
             # embed node features to lower dimension
-            x = self.node_encode_for_edges(x) # [1, N, dim]
+            x = self.node_encode_for_edges(x)  # [1, N, dim]
             # x = F.layer_norm(x, [x.shape[-1]])
 
             u = x[:, in_adj.indices()[0, :]]  # [1, n, dim]
@@ -1635,14 +1624,14 @@ class DGG_LearnableK_debug(nn.Module):
             # convert into to sparse and then into dense
             z = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z.to_dense()
-        elif mode == 'A_uv':
+        elif mode == "A_uv":
             auv = in_adj.values().unsqueeze(-1)  # [n, 1]
             z = self.adj_project(auv).flatten()  # [n]
-            z = torch.sigmoid(z)   # keep probs positive
+            z = torch.sigmoid(z)  # keep probs positive
             z = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
             return z.to_dense()
         else:
-            raise Exception('mode not found')
+            raise Exception("mode not found")
 
 
 class LearnableKEncoder(nn.Module):
@@ -2163,7 +2152,7 @@ def tanh_plot(k=0, w=1):
 
 
 def tanh_grad_test(k=0, w=1, N=10):
-    print('TANH k {} w {} N {}'.format(k, w, N))
+    print("TANH k {} w {} N {}".format(k, w, N))
     torch.manual_seed(0)
     k = torch.tensor(k, requires_grad=True)
     t = torch.arange(N, requires_grad=True)
@@ -2185,18 +2174,22 @@ def tanh_grad_test(k=0, w=1, N=10):
 
     y.backward()
 
-    print('k', k.grad)
-    print('t', t.grad)
-    print('s_log_p', s_log_p.grad)
-    print('first k', first_k.grad)
-    print('first k log p', first_k_log_p.grad)
-    print('adj', adj.grad)
+    print("k", k.grad)
+    print("t", t.grad)
+    print("s_log_p", s_log_p.grad)
+    print("first k", first_k.grad)
+    print("first k log p", first_k_log_p.grad)
+    print("adj", adj.grad)
 
-    plt.scatter(t.detach().numpy(), first_k_log_p.detach().numpy(),
-                    label='{}-{}-{}'.format(k, w, N))
+    plt.scatter(
+        t.detach().numpy(),
+        first_k_log_p.detach().numpy(),
+        label="{}-{}-{}".format(k, w, N),
+    )
+
 
 def tanh_grad_test_01(k=0, w=1, N=10, change=1):
-    print('TANH k {} w {} N {} change {}'.format(k, w, N, change))
+    print("TANH k {} w {} N {} change {}".format(k, w, N, change))
     torch.manual_seed(0)
     k = torch.tensor(k, requires_grad=True)
     t = torch.arange(N, requires_grad=True)
@@ -2213,7 +2206,7 @@ def tanh_grad_test_01(k=0, w=1, N=10, change=1):
     print(gt_adj)
 
     loss = ((gt_adj - adj) ** 2).sum()
-    print('loss', loss)
+    print("loss", loss)
 
     t.retain_grad()
     log_p.retain_grad()
@@ -2225,16 +2218,17 @@ def tanh_grad_test_01(k=0, w=1, N=10, change=1):
 
     loss.backward()
 
-    print('k', k.grad)
-    print('t', t.grad)
-    print('s_log_p', s_log_p.grad)
-    print('first k', first_k.grad)
-    print('first k log p', first_k_log_p.grad)
-    print('adj', adj.grad)
-    print('\n')
+    print("k", k.grad)
+    print("t", t.grad)
+    print("s_log_p", s_log_p.grad)
+    print("first k", first_k.grad)
+    print("first k log p", first_k_log_p.grad)
+    print("adj", adj.grad)
+    print("\n")
+
 
 def identity_grad_test(k=0, w=1, N=10):
-    print('IDENTITY k {} w {} N {}'.format(k, w, N))
+    print("IDENTITY k {} w {} N {}".format(k, w, N))
     torch.manual_seed(0)
     k = torch.tensor(k, requires_grad=True)
     t = torch.arange(N, requires_grad=True)
@@ -2261,18 +2255,22 @@ def identity_grad_test(k=0, w=1, N=10):
     # torch.nn.utils.clip_grad_value_(log_p, 1.0)
     # torch.nn.utils.clip_grad_value_(s_log_p, 1.0)
 
-    print('k', k.grad)
-    print('t', t.grad)
-    print('s_log_p', s_log_p.grad)
-    print('first k', first_k.grad)
-    print('first k log p', first_k_log_p.grad)
-    print('adj', adj.grad)
+    print("k", k.grad)
+    print("t", t.grad)
+    print("s_log_p", s_log_p.grad)
+    print("first k", first_k.grad)
+    print("first k log p", first_k_log_p.grad)
+    print("adj", adj.grad)
 
-    plt.scatter(t.detach().numpy(), first_k_log_p.detach().numpy(),
-                label='{}-{}-{}'.format(k, w, N))
+    plt.scatter(
+        t.detach().numpy(),
+        first_k_log_p.detach().numpy(),
+        label="{}-{}-{}".format(k, w, N),
+    )
+
 
 def identity_grad_test_01(k=0, w=1, N=10, change=1):
-    print('IDENTITY k {} w {} N {} change {}'.format(k, w, N, change))
+    print("IDENTITY k {} w {} N {} change {}".format(k, w, N, change))
     torch.manual_seed(0)
     k = torch.tensor(k, requires_grad=True)
     t = torch.arange(N, requires_grad=True)
@@ -2287,11 +2285,11 @@ def identity_grad_test_01(k=0, w=1, N=10, change=1):
     gt_adj = adj.clone().detach()
     for i in range(change):
         gt_adj[i] = (gt_adj[i] - 1).abs()
-    print('adj', adj)
-    print('gt adj' ,gt_adj)
+    print("adj", adj)
+    print("gt adj", gt_adj)
 
     loss = ((gt_adj - adj) ** 2).sum()
-    print('loss',loss)
+    print("loss", loss)
 
     t.retain_grad()
     log_p.retain_grad()
@@ -2306,19 +2304,19 @@ def identity_grad_test_01(k=0, w=1, N=10, change=1):
     # torch.nn.utils.clip_grad_value_(log_p, 1.0)
     # torch.nn.utils.clip_grad_value_(s_log_p, 1.0)
 
-    print('k', k)
-    print('k grad', k.grad)
-    print('t', t)
-    print('t grad', t.grad)
-    print('s_log_p', s_log_p)
-    print('s_log_p grad', s_log_p.grad)
-    print('first k', first_k)
-    print('first k grad', first_k.grad)
-    print('first k log p', first_k_log_p)
-    print('first k log p grad', first_k_log_p.grad)
-    print('adj', adj)
-    print('adj grad', adj.grad)
-    print('\n')
+    print("k", k)
+    print("k grad", k.grad)
+    print("t", t)
+    print("t grad", t.grad)
+    print("s_log_p", s_log_p)
+    print("s_log_p grad", s_log_p.grad)
+    print("first k", first_k)
+    print("first k grad", first_k.grad)
+    print("first k log p", first_k_log_p)
+    print("first k log p grad", first_k_log_p.grad)
+    print("adj", adj)
+    print("adj grad", adj.grad)
+    print("\n")
 
     fig = plt.figure(figsize=(8, 8))
     gs = fig.add_gridspec(8, 2)
@@ -2352,19 +2350,20 @@ def identity_grad_test_01(k=0, w=1, N=10, change=1):
     ax70.imshow(adj.detach().numpy().reshape(1, -1))
     ax71.imshow(adj.grad.detach().numpy().reshape(1, -1))
 
-    ax00.set_title('adj')
-    ax10.set_title('gt_adj')
-    ax20.set_title('k')
-    ax30.set_title('t')
-    ax40.set_title('s_log_p')
-    ax50.set_title('first_k')
-    ax60.set_title('first_k_log_p')
-    ax70.set_title('adj')
+    ax00.set_title("adj")
+    ax10.set_title("gt_adj")
+    ax20.set_title("k")
+    ax30.set_title("t")
+    ax40.set_title("s_log_p")
+    ax50.set_title("first_k")
+    ax60.set_title("first_k_log_p")
+    ax70.set_title("adj")
 
     plt.show()
 
+
 def identity_grad_test_02(k=0, w=1, N=10, change=1):
-    print('IDENTITY k {} w {} N {} change {}'.format(k, w, N, change))
+    print("IDENTITY k {} w {} N {} change {}".format(k, w, N, change))
     torch.manual_seed(0)
     k = torch.tensor(k, requires_grad=True)
     t = torch.arange(N, requires_grad=True)
@@ -2378,11 +2377,11 @@ def identity_grad_test_02(k=0, w=1, N=10, change=1):
     gt_adj = adj.clone().detach()
     for i in range(change):
         gt_adj[i] = (gt_adj[i] - 1).abs()
-    print('adj', adj)
-    print('gt adj' ,gt_adj)
+    print("adj", adj)
+    print("gt adj", gt_adj)
 
     loss = ((gt_adj - adj) ** 2).sum()
-    print('loss',loss)
+    print("loss", loss)
 
     t.retain_grad()
     log_p.retain_grad()
@@ -2396,16 +2395,16 @@ def identity_grad_test_02(k=0, w=1, N=10, change=1):
     # torch.nn.utils.clip_grad_value_(log_p, 1.0)
     # torch.nn.utils.clip_grad_value_(s_log_p, 1.0)
 
-    print('k', k)
-    print('k grad', k.grad)
-    print('t', t)
-    print('t grad', t.grad)
-    print('s_log_p', s_log_p)
-    print('first k', first_k)
-    print('first k grad', first_k.grad)
-    print('adj', adj)
-    print('adj grad', adj.grad)
-    print('\n')
+    print("k", k)
+    print("k grad", k.grad)
+    print("t", t)
+    print("t grad", t.grad)
+    print("s_log_p", s_log_p)
+    print("first k", first_k)
+    print("first k grad", first_k.grad)
+    print("adj", adj)
+    print("adj grad", adj.grad)
+    print("\n")
 
     fig = plt.figure(figsize=(8, 8))
     gs = fig.add_gridspec(8, 2)
@@ -2436,19 +2435,20 @@ def identity_grad_test_02(k=0, w=1, N=10, change=1):
     ax70.imshow(adj.detach().numpy().reshape(1, -1))
     ax71.imshow(adj.grad.detach().numpy().reshape(1, -1))
 
-    ax00.set_title('adj')
-    ax10.set_title('gt_adj')
-    ax20.set_title('k')
-    ax30.set_title('t')
-    ax40.set_title('s_log_p')
-    ax50.set_title('first_k')
-    ax60.set_title('first_k_log_p')
-    ax70.set_title('adj')
+    ax00.set_title("adj")
+    ax10.set_title("gt_adj")
+    ax20.set_title("k")
+    ax30.set_title("t")
+    ax40.set_title("s_log_p")
+    ax50.set_title("first_k")
+    ax60.set_title("first_k_log_p")
+    ax70.set_title("adj")
 
     plt.show()
 
+
 def identity_grad_test_03(k=3, w=1, N=10, gt_k=8):
-    print('IDENTITY k {} w {} N {} gt_k {}'.format(k, w, N, gt_k))
+    print("IDENTITY k {} w {} N {} gt_k {}".format(k, w, N, gt_k))
     torch.manual_seed(0)
     k = torch.tensor(k, requires_grad=True)
     t = torch.arange(N, requires_grad=True)
@@ -2460,10 +2460,10 @@ def identity_grad_test_03(k=3, w=1, N=10, gt_k=8):
         first_k[:] = torch.clamp(first_k, min=0, max=1)
 
     gt_first_k = torch.zeros_like(first_k)
-    gt_first_k[:int(gt_k)] = 1
+    gt_first_k[: int(gt_k)] = 1
     loss = (gt_first_k - first_k) ** 2
     loss = loss.sum()
-    print('loss',loss)
+    print("loss", loss)
 
     t.retain_grad()
     log_p.retain_grad()
@@ -2476,14 +2476,14 @@ def identity_grad_test_03(k=3, w=1, N=10, gt_k=8):
     # torch.nn.utils.clip_grad_value_(log_p, 1.0)
     # torch.nn.utils.clip_grad_value_(s_log_p, 1.0)
 
-    print('k', k)
-    print('k grad', k.grad)
-    print('t', t)
-    print('t grad', t.grad)
-    print('s_log_p', s_log_p)
-    print('first k', first_k)
-    print('first k grad', first_k.grad)
-    print('\n')
+    print("k", k)
+    print("k grad", k.grad)
+    print("t", t)
+    print("t grad", t.grad)
+    print("s_log_p", s_log_p)
+    print("first k", first_k)
+    print("first k grad", first_k.grad)
+    print("\n")
 
     fig = plt.figure(figsize=(8, 8))
     gs = fig.add_gridspec(8, 2)
@@ -2510,18 +2510,16 @@ def identity_grad_test_03(k=3, w=1, N=10, gt_k=8):
     ax50.imshow(first_k.detach().numpy().reshape(1, -1))
     ax51.imshow(first_k.grad.detach().numpy().reshape(1, -1))
 
-    ax00.set_title('adj')
-    ax10.set_title('gt_adj')
-    ax20.set_title('k')
-    ax30.set_title('t')
-    ax40.set_title('s_log_p')
-    ax50.set_title('first_k')
-    ax60.set_title('first_k_log_p')
-    ax70.set_title('adj')
+    ax00.set_title("adj")
+    ax10.set_title("gt_adj")
+    ax20.set_title("k")
+    ax30.set_title("t")
+    ax40.set_title("s_log_p")
+    ax50.set_title("first_k")
+    ax60.set_title("first_k_log_p")
+    ax70.set_title("adj")
 
     plt.show()
-
-
 
 
 if __name__ == "__main__":
@@ -2561,4 +2559,3 @@ if __name__ == "__main__":
 
     identity_grad_test_03(k=2.0, w=1, N=10.0, gt_k=8.0)
     identity_grad_test_03(k=8.0, w=1, N=10.0, gt_k=2.0)
-

@@ -16,6 +16,11 @@ from torch.utils.tensorboard import SummaryWriter
 import shutil
 import torch.utils.data as Data
 import torch.nn as nn
+from torch_geometric.utils import to_scipy_sparse_matrix
+from torch_geometric.datasets import Flickr
+from torch_geometric.loader import GraphSAINTRandomWalkSampler
+from torch_geometric.nn import GraphConv
+from torch_geometric.utils import degree
 from sklearn.metrics import f1_score
 
 # Training settings
@@ -27,7 +32,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="ppi_gcnii_dgg_k_only", help="experiment name"
+    "--expname", type=str, default="temp", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -52,7 +57,15 @@ parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
 parser.add_argument(
-    "--model", type=str, default='GCNIIppi_DGG', help="model name"
+    "--use_normalization", type=str2bool, default=False,
+    help="use normalization constants from graphsaint"
+)
+parser.add_argument("--model", type=str, default="GCN_DGG", help="model name")
+parser.add_argument(
+    "--edge_noise_level",
+    type=float,
+    default=0.0005,
+    help="percentage of noisy edges to add",
 )
 # Differentiable graph generator specific
 parser.add_argument(
@@ -64,7 +77,7 @@ parser.add_argument(
 parser.add_argument(
     "--extra_edge_dim",
     type=int,
-    default=1,
+    default=2,
     help="extra edge dimension (for degree etc)",
 )
 parser.add_argument(
@@ -131,31 +144,34 @@ parser.add_argument(
 parser.add_argument(
     "--dgg_adj_input",
     type=str,
-    default='input_adj',
+    default="input_adj",
     help="type of adjacency matrix to use for DGG, input_adj refers to the "
-         "original input adjacency matrix, anything else refers to using the "
-         "learned adjancency matrix",
+    "original input adjacency matrix, anything else refers to using the "
+    "learned adjancency matrix",
 )
 parser.add_argument(
     "--dgg_mode_edge_net",
     type=str,
-    default='project_adj',
+    default="u-v-dist",
+    choices=["u-v-dist", "u-v-A_uv", "u-v-deg", "edge_conv", "A_uv"],
     help="mode for the edge_prob_net in DGG, determines which features are used"
-         "in the forward pass",
+    "in the forward pass",
 )
 parser.add_argument(
     "--dgg_mode_k_net",
     type=str,
-    default='learn_normalized_degree_relu',
+    default="pass",
+    choices=["pass", "input_deg", "gcn-x-deg", "x"],
     help="mode for the k_estimate_net in DGG, determines which features are used"
-         "in the forward pass",
+    "in the forward pass",
 )
 parser.add_argument(
     "--dgg_mode_k_select",
     type=str,
-    default='k_only',
+    default="edge_p-cdf",
+    choices=["edge_p-cdf", "k_only", "k_times_edge_prob"],
     help="mode for the k_selector in DGG, determines which features are used"
-         "in the forward pass",
+    "in the forward pass",
 )
 
 def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
@@ -171,9 +187,18 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
     )
 
 
-def train(
-        args, model, optimizer, train_feat, train_adj,
-        train_labels, train_nodes, loss_fcn, device, writer, epoch
+def train_ppi(
+    args,
+    model,
+    optimizer,
+    train_feat,
+    train_adj,
+    train_labels,
+    train_nodes,
+    loss_fcn,
+    device,
+    writer,
+    epoch,
 ):
     model.train()
     loss_tra = 0
@@ -194,9 +219,50 @@ def train(
     acc_tra /= 20
     return loss_tra, acc_tra
 
+
+def train(args, model, optimizer, loader, device, epoch, writer):
+    model.train()
+
+    total_loss = total_examples = total_acc = 0
+    for data in loader:
+        # parse data
+        data = data.to(device)
+        batch_adj = to_scipy_sparse_matrix(
+            edge_index=data.edge_index, num_nodes=data.num_nodes
+        )
+        batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
+        batch_feature = data.x.to(device)
+        batch_label = data.y.to(device)
+
+        # zero grads
+        optimizer.zero_grad()
+
+        # forward pass
+        if args.use_normalization:
+            edge_weight = data.edge_norm * data.edge_weight
+            out = model(data.x, data.edge_index, edge_weight)
+            loss = F.nll_loss(out, data.y, reduction='none')
+            loss = (loss * data.node_norm)[data.train_mask].sum()
+        else:
+            output = model(batch_feature, batch_adj, writer, epoch)
+            loss_train = loss_fcn(
+                output[data.train_mask], batch_label[data.train_mask]
+            )
+            acc_train = accuracy(
+                output[data.train_mask], batch_label[data.train_mask]
+            )
+
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * data.num_nodes
+        total_acc += acc_train.item() * data.num_nodes
+        total_examples += data.num_nodes
+    loss_train = total_loss / total_examples
+    acc_train = total_acc / total_examples
+    return loss_train.item(), acc_train.item()
+
 def train_debug(
-        args, model, optimizer, features, adj, labels, idx_train,
-        device, epoch, writer
+    args, model, optimizer, features, adj, labels, idx_train, device, epoch, writer
 ):
     model.train()
     optimizer.zero_grad()
@@ -204,7 +270,6 @@ def train_debug(
     acc_train = accuracy(output[idx_train], labels[idx_train].to(device))
     loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
     loss_train.backward()
-
 
     # k_net_grads =  torch.cat(
     #     [p.grad.flatten() for name, p in model.dggs.named_parameters()
@@ -232,42 +297,57 @@ def train_debug(
     return loss_train.item(), acc_train.item()
 
 
-def validate(
-        args, model, val_feat, val_adj, val_labels, val_nodes, loss_fcn, device
-):
-    loss_val = 0
-    acc_val = 0
-    for batch in range(2):
-        batch_adj = val_adj[batch].to(device)
-        batch_feature = val_feat[batch].to(device)
-        batch_label = val_labels[batch].to(device)
-        score, val_loss = evaluate(
-            batch_feature, model, val_nodes[batch], batch_adj, batch_label, loss_fcn
-        )
-        loss_val += val_loss
-        acc_val += score
-    loss_val /= 2
-    acc_val /= 2
-    return loss_val, acc_val
-
-def test(
-    args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
-):
+@torch.no_grad()
+def validate(args, model, loader, device, epoch, writer):
     model.eval()
-    loss_test = 0
-    acc_test = 0
-    for batch in range(2):
-        batch_adj = test_adj[batch].to(device)
-        batch_feature = test_feat[batch].to(device)
-        batch_label = test_labels[batch].to(device)
-        score, loss = evaluate(
-            batch_feature, model, test_nodes[batch], batch_adj, batch_label, loss_fcn
+
+    total_train_acc = total_examples = 0
+    for data in loader:
+        data = data.to(device)
+        batch_adj = to_scipy_sparse_matrix(
+            edge_index=data.edge_index, num_nodes=data.num_nodes
         )
-        loss_test += loss
-        acc_test += score
-    acc_test /= 2
-    loss_test /= 2
-    return loss_test, acc_test
+        batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
+        batch_feature = data.x.to(device)
+        batch_label = data.y.to(device)
+
+        out = model(batch_feature, batch_adj, writer, epoch)
+        pred = out.argmax(dim=-1)
+        correct = pred.eq(data.y.to(device))
+
+        total_test_acc += correct[data['val_mask']].sum().item() \
+                          / data['val_mask'].sum().item() * data.num_nodes
+        total_examples += data.num_nodes
+
+    test_acc = total_test_acc / total_examples
+    return _, test_acc
+
+
+@torch.no_grad()
+def test(args, model, loader, device, epoch, writer):
+    model.eval()
+
+    total_train_acc = total_examples = 0
+    for data in loader:
+        data = data.to(device)
+        batch_adj = to_scipy_sparse_matrix(
+            edge_index=data.edge_index, num_nodes=data.num_nodes
+        )
+        batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
+        batch_feature = data.x.to(device)
+        batch_label = data.y.to(device)
+
+        out = model(batch_feature, batch_adj, writer, epoch)
+        pred = out.argmax(dim=-1)
+        correct = pred.eq(data.y.to(device))
+
+        total_test_acc += correct[data['test_mask']].sum().item() \
+                          / data['test_mask'].sum().item() * data.num_nodes
+        total_examples += data.num_nodes
+
+    test_acc = total_test_acc / total_examples
+    return _, test_acc
+
 
 def test_best(
     args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
@@ -290,13 +370,13 @@ def test_best(
 
 
 # adapted from DGL
-def evaluate(feats, model, idx, subgraph, labels, loss_fcn):
+def evaluate(feats, model, mask, subgraph, labels, loss_fcn):
     model.eval()
     with torch.no_grad():
         output = model(feats, subgraph)
-        loss_data = loss_fcn(output[:idx], labels[:idx].float())
-        predict = np.where(output[:idx].data.cpu().numpy() > 0.5, 1, 0)
-        score = f1_score(labels[:idx].data.cpu().numpy(), predict, average="micro")
+        loss_data = loss_fcn(output[mask], labels[mask].float())
+        predict = np.where(output[mask].data.cpu().numpy() > 0.5, 1, 0)
+        score = f1_score(labels[mask].data.cpu().numpy(), predict, average="micro")
         return score, loss_data.item()
 
 
@@ -312,7 +392,7 @@ if __name__ == "__main__":
     outdir = os.path.join(args.root, "outputs")
     expdir = os.path.join(outdir, args.expname)
     tbdir = os.path.join(expdir, "tb")
-    codedir = os.path.join(expdir, 'code')
+    codedir = os.path.join(expdir, "code")
     os.makedirs(outdir, exist_ok=True)
     os.makedirs(expdir, exist_ok=True)
     os.makedirs(tbdir, exist_ok=True)
@@ -321,35 +401,35 @@ if __name__ == "__main__":
     print(checkpt_file)
 
     # Make copy of code
-    python_files = [f for f in os.listdir(args.root) if '.py' in f]
+    python_files = [f for f in os.listdir(args.root) if ".py" in f]
     for f in python_files:
-        shutil.copyfile(
-            src=os.path.join(args.root, f),
-            dst=os.path.join(codedir, f)
-        )
+        shutil.copyfile(src=os.path.join(args.root, f), dst=os.path.join(codedir, f))
 
     # Tensorboard writer
     writer = SummaryWriter(tbdir)
 
     # Load data
-    if 'DGG' not in args.model:
+    if "DGG" not in args.model:
         args.pre_normalize_adj = False
-    train_adj, val_adj, test_adj, train_feat, val_feat, test_feat, \
-    train_labels, val_labels, test_labels, train_nodes, val_nodes, \
-    test_nodes = load_ppi_from_disk(normalize_adj=args.pre_normalize_adj)
 
-    idx = torch.LongTensor(range(20))
-    loader = Data.DataLoader(dataset=idx, batch_size=1, shuffle=True, num_workers=0)
-
+    root = "/vol/research/sceneEvolution/data/graph_data"
+    dataset = Flickr(root)
+    data = dataset[0]
+    row, col = data.edge_index
+    data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
+    loader = GraphSAINTRandomWalkSampler(data, batch_size=2000, walk_length=2,
+                                         num_steps=5, sample_coverage=100,
+                                         save_dir=dataset.processed_dir,
+                                         num_workers=4)
     cudaid = "cuda"
     device = torch.device(cudaid)
 
     # Load model
     model = models.__dict__[args.model](
-        nfeat=train_feat[0].shape[1],
+        nfeat=dataset.num_features,
         nlayers=args.layer,
         nhidden=args.hidden,
-        nclass=train_labels[0].shape[1],
+        nclass=dataset.num_classes,
         dropout=args.dropout,
         lamda=args.lamda,
         alpha=args.alpha,
@@ -367,14 +447,13 @@ if __name__ == "__main__":
     acc = 0
     for epoch in range(args.epochs):
         loss_tra, acc_tra = train(
-            args, model, optimizer, train_feat, train_adj,
-            train_labels, train_nodes, loss_fcn, device, writer, epoch
+            args, model, optimizer, loader, device, epoch, writer
         )
-        loss_val, acc_val = validate(
-            args, model, val_feat, val_adj, val_labels, val_nodes, loss_fcn, device
-        )
+        acc_val = validate(
+            args, model, loader, device, epoch, writer
+        )[1]
         acc_test = test(
-            args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
+            args, model, loader, device, epoch, writer
         )[1]
 
         if (epoch + 1) % 1 == 0:
@@ -408,9 +487,10 @@ if __name__ == "__main__":
             break
 
     if args.test:
-        acc = test_best(
-            args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
-        )[1]
+        # acc = test_best(
+        #     args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
+        # )[1]
+        acc = acc_test
 
     print("Train cost: {:.4f}s".format(time.time() - t_total))
     print("Load {}th epoch".format(best_epoch))

@@ -8,6 +8,7 @@ from dgm import DGG_LearnableK, DGG_LearnableK_debug
 from utils import torch_normalized_adjacency
 from torch_geometric.datasets import KarateClub
 
+
 class GraphConvolution(nn.Module):
     def __init__(self, in_features, out_features, residual=False, variant=False):
         super(GraphConvolution, self).__init__()
@@ -39,6 +40,7 @@ class GraphConvolution(nn.Module):
         if self.residual:
             output = output + input
         return output
+
 
 class DenseGraphConvolution(nn.Module):
     def __init__(self, in_features, out_features, residual=False, variant=False):
@@ -72,6 +74,7 @@ class DenseGraphConvolution(nn.Module):
             output = output + input
         return output
 
+
 class GCNConv(nn.Module):
     def __init__(self, in_channels, out_channels, A=None, cached=False):
         super(GCNConv, self).__init__()
@@ -93,8 +96,11 @@ class GCNConv(nn.Module):
         out = torch.relu(AxW)
         return out
 
+
 class GCNII(nn.Module):
-    def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args):
+    def __init__(
+        self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args
+    ):
         super(GCNII, self).__init__()
         self.convs = nn.ModuleList()
         for _ in range(nlayers):
@@ -122,6 +128,7 @@ class GCNII(nn.Module):
         layer_inner = F.dropout(layer_inner, self.dropout, training=self.training)
         layer_inner = self.fcs[-1](layer_inner)
         return F.log_softmax(layer_inner, dim=1)
+
 
 # class GCNII_DGG(nn.Module):
 #     def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args):
@@ -220,8 +227,11 @@ class GCNII(nn.Module):
 #
 #         return F.log_softmax(layer_inner, dim=1)
 
+
 class GCNII_DGG(nn.Module):
-    def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args):
+    def __init__(
+        self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args
+    ):
         super(GCNII_DGG, self).__init__()
         self.convs = nn.ModuleList()
         for _ in range(nlayers):
@@ -235,9 +245,7 @@ class GCNII_DGG(nn.Module):
         self.dggs = nn.ModuleList()
         for _ in range(args.n_dgg_layers):
             self.dggs.append(
-                DGG_LearnableK_debug(
-                    in_dim=nfeat, latent_dim=nhidden, args=args
-                )
+                DGG_LearnableK_debug(in_dim=nfeat, latent_dim=nhidden, args=args)
             )
 
         self.params1 = list(self.convs.parameters())
@@ -282,15 +290,14 @@ class GCNII_DGG(nn.Module):
 
         # add self-loops
         in_adj = (
-                in_adj.to_dense() +
-                torch.eye(in_adj.shape[0], device=in_adj.device)
+            in_adj.to_dense() + torch.eye(in_adj.shape[0], device=in_adj.device)
         ).to_sparse()
 
         # coalesce to track grads
         unnorm_adj = in_adj.coalesce()
         for i, con in enumerate(self.convs):
             if i < len(self.dggs):
-                if self.dgg_adj_input == 'input_adj':
+                if self.dgg_adj_input == "input_adj":
                     # always use input adjacency
                     unnorm_adj = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
                 else:
@@ -310,19 +317,19 @@ class GCNII_DGG(nn.Module):
     def dgg_net(self, x, i, unnorm_adj, writer, epoch):
         # learn adjacency (sparse tensor)
         adj = self.dggs[i](
-            x=x, in_adj=unnorm_adj, noise=self.training,
-            writer=writer, epoch=epoch
+            x=x, in_adj=unnorm_adj, noise=self.training, writer=writer, epoch=epoch
         )
         return adj
 
+
 class GCNII_DGG_viz(nn.Module):
-    def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha,
-                 variant, args):
+    def __init__(
+        self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args
+    ):
         super(GCNII_DGG_viz, self).__init__()
         self.convs = nn.ModuleList()
         for _ in range(nlayers):
-            self.convs.append(
-                DenseGraphConvolution(nhidden, nhidden, variant=variant))
+            self.convs.append(DenseGraphConvolution(nhidden, nhidden, variant=variant))
 
         self.fcs = nn.ModuleList()
         self.fcs.append(nn.Linear(nfeat, nhidden))
@@ -342,11 +349,15 @@ class GCNII_DGG_viz(nn.Module):
         for _ in range(args.n_dgg_layers):
             self.dggs.append(
                 DGG_LearnableK(
-                    in_dim=nhidden, latent_dim=nhidden, k_bias=self.k_bias,
+                    in_dim=nhidden,
+                    latent_dim=nhidden,
+                    k_bias=self.k_bias,
                     hard=self.st_gumbel_softmax,
                     self_loops_noise=self.self_loops_noise,
-                    dist_fn=self.dgg_dist_fn, k_net_input=args.k_net_input,
-                    degree_mean=self.deg_mean, degree_std=self.deg_std,
+                    dist_fn=self.dgg_dist_fn,
+                    k_net_input=args.k_net_input,
+                    degree_mean=self.deg_mean,
+                    degree_std=self.deg_std,
                 )
             )
 
@@ -373,8 +384,12 @@ class GCNII_DGG_viz(nn.Module):
             # learn structure and get adjacency matrix
             if i < len(self.dggs):
                 adj = self.dggs[i](
-                    x=layer_inner, in_adj=adj,
-                    temp=self.dgm_temp, noise=False, writer=writer, epoch=epoch
+                    x=layer_inner,
+                    in_adj=adj,
+                    temp=self.dgm_temp,
+                    noise=False,
+                    writer=writer,
+                    epoch=epoch,
                 )
                 adj = adj.squeeze(0)
                 # if writer is not None:
@@ -384,12 +399,11 @@ class GCNII_DGG_viz(nn.Module):
                 #     )
                 #     writer.add_histogram('train/k', k.flatten(), epoch)
 
-                adj = torch_normalized_adjacency(adj, mode='self_loops_present')
+                adj = torch_normalized_adjacency(adj, mode="self_loops_present")
                 # adj = adj.to_sparse()
                 # print('adj', adj.sum(-1).mean().item(), adj.sum(-1).max().item(), adj.sum(-1).mean().item())
 
-            layer_inner = F.dropout(layer_inner, self.dropout,
-                                    training=self.training)
+            layer_inner = F.dropout(layer_inner, self.dropout, training=self.training)
             layer_inner = self.act_fn(
                 con(layer_inner, adj, _layers[0], self.lamda, self.alpha, i + 1)
             )
@@ -398,8 +412,11 @@ class GCNII_DGG_viz(nn.Module):
 
         return F.log_softmax(layer_inner, dim=1)
 
+
 class GCNIIppi(nn.Module):
-    def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args):
+    def __init__(
+        self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args
+    ):
         super(GCNIIppi, self).__init__()
         self.convs = nn.ModuleList()
         for _ in range(nlayers):
@@ -429,8 +446,11 @@ class GCNIIppi(nn.Module):
         layer_inner = self.sig(self.fcs[-1](layer_inner))
         return layer_inner
 
+
 class GCNIIppi_DGG(nn.Module):
-    def __init__(self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args):
+    def __init__(
+        self, nfeat, nlayers, nhidden, nclass, dropout, lamda, alpha, variant, args
+    ):
         super(GCNIIppi_DGG, self).__init__()
         self.convs = nn.ModuleList()
         for _ in range(nlayers):
@@ -450,10 +470,9 @@ class GCNIIppi_DGG(nn.Module):
         self.dggs = nn.ModuleList()
         for _ in range(args.n_dgg_layers):
             self.dggs.append(
-                DGG_LearnableK_debug(
-                    in_dim=nfeat, latent_dim=nhidden, args=args
-                )
+                DGG_LearnableK_debug(in_dim=nfeat, latent_dim=nhidden, args=args)
             )
+
     def normalize_adj(self, A_hat):
         """
         renormalisation of adjacency matrix
@@ -478,15 +497,14 @@ class GCNIIppi_DGG(nn.Module):
 
         # add self-loops
         in_adj = (
-                in_adj.to_dense() +
-                torch.eye(in_adj.shape[0], device=in_adj.device)
+            in_adj.to_dense() + torch.eye(in_adj.shape[0], device=in_adj.device)
         ).to_sparse()
 
         # coalesce to track grads
         unnorm_adj = in_adj.coalesce()
         for i, con in enumerate(self.convs):
             if i < len(self.dggs):
-                if self.dgg_adj_input == 'input_adj':
+                if self.dgg_adj_input == "input_adj":
                     # always use input adjacency
                     unnorm_adj = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
                 else:
@@ -505,10 +523,10 @@ class GCNIIppi_DGG(nn.Module):
     def dgg_net(self, x, i, unnorm_adj, writer, epoch):
         # learn adjacency (sparse tensor)
         adj = self.dggs[i](
-            x=x, in_adj=unnorm_adj, noise=self.training,
-            writer=writer, epoch=epoch
+            x=x, in_adj=unnorm_adj, noise=self.training, writer=writer, epoch=epoch
         )
         return adj
+
 
 class GCN(torch.nn.Module):
     def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, **kwargs):
@@ -546,20 +564,21 @@ class GCN(torch.nn.Module):
 
         x = F.dropout(self.conv1(x, adj), training=self.training)
         if writer is not None:
-            writer.add_histogram('gcn_conv1_dist', x, epoch)
+            writer.add_histogram("gcn_conv1_dist", x, epoch)
             print(
-                'conv1 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item())
+                "conv1 mu: {:.5f} std: {:.5f}".format(x.mean().item(), x.std().item())
             )
 
         x = self.conv2(x, adj)
         if writer is not None:
-            writer.add_histogram('gcn_conv2_dist', x, epoch)
+            writer.add_histogram("gcn_conv2_dist", x, epoch)
             # print(
             #     'conv2 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item())
             # )
 
         out = F.log_softmax(x, dim=-1)
         return out
+
 
 class GCN_debug(torch.nn.Module):
     def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, **kwargs):
@@ -604,14 +623,21 @@ class GCN_debug(torch.nn.Module):
 
         x = F.dropout(self.conv1(x, adj), training=self.training)
         if epoch % 10 == 0:
-            print('conv1 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
+            print(
+                "conv1 mu: {:.5f} std: {:.5f}".format(x.mean().item(), x.std().item())
+            )
         x = self.conv2(x, adj)
         if epoch % 10 == 0:
-            print('conv2 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
+            print(
+                "conv2 mu: {:.5f} std: {:.5f}".format(x.mean().item(), x.std().item())
+            )
         return x, adj
 
+
 class GCN_DGG(torch.nn.Module):
-    def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs):
+    def __init__(
+        self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs
+    ):
         super(GCN_DGG, self).__init__()
 
         # GCN layers
@@ -625,9 +651,7 @@ class GCN_DGG(torch.nn.Module):
         self.dggs = nn.ModuleList()
         for _ in range(args.n_dgg_layers):
             self.dggs.append(
-                DGG_LearnableK_debug(
-                    in_dim=nfeat, latent_dim=nhidden, args=args
-                )
+                DGG_LearnableK_debug(in_dim=nfeat, latent_dim=nhidden, args=args)
             )
 
         self.params1 = list(self.conv1.parameters())
@@ -679,24 +703,25 @@ class GCN_DGG(torch.nn.Module):
         # print('n edges before self loops', in_adj.to_dense().sum())
         # add self-loops
         in_adj = (
-                in_adj.to_dense() +
-                torch.eye(in_adj.shape[0], device=in_adj.device)
+            in_adj.to_dense() + torch.eye(in_adj.shape[0], device=in_adj.device)
         ).to_sparse()
         # print('n edges with self loops', in_adj.to_dense().sum())
         if epoch == 0:
             diagonal_w = in_adj.to_dense()[
-                             torch.arange(in_adj.shape[0]), torch.arange(in_adj.shape[0])
-                         ] / in_adj.to_dense().sum(-1)
+                torch.arange(in_adj.shape[0]), torch.arange(in_adj.shape[0])
+            ] / in_adj.to_dense().sum(-1)
 
-            print('in diag w {:.5f} {:.5f}'.format(
-                diagonal_w.mean().item(), diagonal_w.std().item()
-            ))
+            print(
+                "in diag w {:.5f} {:.5f}".format(
+                    diagonal_w.mean().item(), diagonal_w.std().item()
+                )
+            )
         # coalesce to track grads
         unnorm_adj = in_adj.coalesce()
 
         for i, conv in enumerate(self.convs):
             if i < len(self.dggs):
-                if self.dgg_adj_input == 'input_adj':
+                if self.dgg_adj_input == "input_adj":
                     # always use input adjacency
                     unnorm_adj = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
                 else:
@@ -705,9 +730,8 @@ class GCN_DGG(torch.nn.Module):
                 norm_adj = self.normalize_adj(unnorm_adj.to_dense())
 
             diagonal_w = norm_adj[
-                             torch.arange(norm_adj.shape[0]), torch.arange(
-                                 norm_adj.shape[0])
-                         ] / norm_adj.sum(-1)
+                torch.arange(norm_adj.shape[0]), torch.arange(norm_adj.shape[0])
+            ] / norm_adj.sum(-1)
             # print('out diag w {:.5f} {:.5f}'.format(
             #     diagonal_w.mean().item(), diagonal_w.std().item()))
 
@@ -717,7 +741,7 @@ class GCN_DGG(torch.nn.Module):
                 x = F.dropout(x, training=self.training)
 
             if writer is not None:
-                writer.add_histogram('gcn_conv{}_dist'.format(i + 1), x, epoch)
+                writer.add_histogram("gcn_conv{}_dist".format(i + 1), x, epoch)
                 # print(
                 #     'conv{} mu: {:.5f} std: {:.5f}'.format(i + 1, x.mean().item(),
                 #                                           x.std().item())
@@ -738,13 +762,15 @@ class GCN_DGG(torch.nn.Module):
     def dgg_net(self, x, i, unnorm_adj, writer, epoch):
         # learn adjacency (sparse tensor)
         adj = self.dggs[i](
-            x=x, in_adj=unnorm_adj, noise=self.training,
-            writer=writer, epoch=epoch
+            x=x, in_adj=unnorm_adj, noise=self.training, writer=writer, epoch=epoch
         )
         return adj
 
+
 class GCN_DGG_debug(torch.nn.Module):
-    def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs):
+    def __init__(
+        self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs
+    ):
         super(GCN_DGG_debug, self).__init__()
 
         # GCN layers
@@ -758,9 +784,7 @@ class GCN_DGG_debug(torch.nn.Module):
         self.dggs = nn.ModuleList()
         for _ in range(args.n_dgg_layers):
             self.dggs.append(
-                DGG_LearnableK_debug(
-                    in_dim=nfeat, latent_dim=nhidden, args=args
-                )
+                DGG_LearnableK_debug(in_dim=nfeat, latent_dim=nhidden, args=args)
             )
 
         self.params1 = list(self.conv1.parameters())
@@ -796,8 +820,7 @@ class GCN_DGG_debug(torch.nn.Module):
         """
         # add self-loops
         in_adj = (
-                in_adj.to_dense() +
-                torch.eye(in_adj.shape[0], device=in_adj.device)
+            in_adj.to_dense() + torch.eye(in_adj.shape[0], device=in_adj.device)
         ).to_sparse()
 
         # coalesce to track grads
@@ -805,12 +828,16 @@ class GCN_DGG_debug(torch.nn.Module):
 
         for i, conv in enumerate(self.convs):
             if i < len(self.dggs):
-                if self.dgg_adj_input == 'input_adj':
+                if self.dgg_adj_input == "input_adj":
                     # always use input adjacency
-                    unnorm_adj, debug_dict = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
+                    unnorm_adj, debug_dict = self.dgg_net(
+                        x, i, in_adj.coalesce(), writer, epoch
+                    )
                 else:
                     # use updated adjacency
-                    unnorm_adj, debug_dict = self.dgg_net(x, i, unnorm_adj, writer, epoch)
+                    unnorm_adj, debug_dict = self.dgg_net(
+                        x, i, unnorm_adj, writer, epoch
+                    )
 
                 # convert to dense tensor and normal
                 unnorm_adj = unnorm_adj.to_dense()
@@ -839,14 +866,11 @@ class GCN_DGG_debug(torch.nn.Module):
     def dgg_net(self, x, i, unnorm_adj, writer, epoch):
         # learn adjacency (sparse tensor)
         adj = self.dggs[i](
-            x=x, in_adj=unnorm_adj, noise=self.training,
-            writer=writer, epoch=epoch
+            x=x, in_adj=unnorm_adj, noise=self.training, writer=writer, epoch=epoch
         )
         return adj
 
 
-
 if __name__ == "__main__":
-
 
     pass

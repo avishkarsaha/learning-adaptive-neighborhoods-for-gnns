@@ -11,6 +11,11 @@ import json
 from networkx.readwrite import json_graph
 import pdb
 from torch_geometric.datasets import AttributedGraphDataset
+import torch_geometric.datasets as pygeo_datasets
+import torch_geometric.loader as pygeo_loaders
+from torch_geometric.data import Data
+from torch_geometric.utils import degree
+from torch_geometric.utils import to_scipy_sparse_matrix
 sys.setrecursionlimit(99999)
 
 
@@ -42,8 +47,9 @@ def sys_normalized_adjacency(adj):
     d_mat_inv_sqrt = sp.diags(d_inv_sqrt)
     return d_mat_inv_sqrt.dot(adj).dot(d_mat_inv_sqrt).tocoo()
 
-def torch_normalized_adjacency(adj, mode='add_self_loops'):
-    if mode == 'add_self_loops':
+
+def torch_normalized_adjacency(adj, mode="add_self_loops"):
+    if mode == "add_self_loops":
         adj = adj + torch.eye(adj.shape[0], device=adj.device)
         row_sum = adj.sum(1)
         row_sum = (row_sum == 0) * 1 + row_sum
@@ -52,7 +58,7 @@ def torch_normalized_adjacency(adj, mode='add_self_loops'):
         d_mat_inv_sqrt = torch.diag(d_inv_sqrt)
         norm_adj = d_mat_inv_sqrt @ adj @ d_mat_inv_sqrt
         return norm_adj
-    elif mode == 'self_loops_present':
+    elif mode == "self_loops_present":
         # adj = adj + torch.eye(adj.shape[0], device=adj.device)
         row_sum = adj.sum(1)
         row_sum = (row_sum == 0) * 1 + row_sum
@@ -72,6 +78,7 @@ def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     values = torch.from_numpy(sparse_mx.data)
     shape = torch.Size(sparse_mx.shape)
     return torch.sparse.FloatTensor(indices, values, shape)
+
 
 def add_noisy_edges(adj, noise_level=0.1):
     np.random.seed(0)
@@ -165,7 +172,7 @@ def load_citation(dataset_str, root, normalize_adj=False, noise=0.0):
     # normalize adjacency if not using DGG
 
     if normalize_adj:
-        adj = sys_normalized_adjacency(adj) # adds self loops and normalises
+        adj = sys_normalized_adjacency(adj)  # adds self loops and normalises
 
     adj = sparse_mx_to_torch_sparse_tensor(adj)
 
@@ -186,7 +193,6 @@ def normalize_adj_gcn(A):
     D = D.inverse().sqrt()
     A_hat = torch.mm(torch.mm(D, A_hat), D)
     return A_hat
-
 
 
 # adapted from PetarV/GAT
@@ -223,6 +229,7 @@ def test(adj, mapping):
                 #  if adj[i,j] == 1:
                 return False
     return True
+
 
 def find_split(adj, mapping, ds_label):
     nb_nodes = adj.shape[0]
@@ -535,24 +542,27 @@ def load_ppi(normalize_adj=True):
         test_nodes,
     )
 
+
 def load_ppi_from_disk(normalize_adj=True):
 
-    fn = '/vol/research/sceneEvolution/models/GCNII/' \
-              'ppi/ppi_data_adj_norm{}.pt'.format(str(normalize_adj))
+    fn = (
+        "/vol/research/sceneEvolution/models/GCNII/"
+        "ppi/ppi_data_adj_norm{}.pt".format(str(normalize_adj))
+    )
     data = torch.load(fn)
 
-    train_adj_list = data['train_adj_list']
-    val_adj_list = data['val_adj_list']
-    test_adj_list = data['test_adj_list']
-    train_feat = data['train_feat']
-    val_feat = data['val_feat']
-    test_feat = data['test_feat']
-    train_labels = data['train_labels']
-    val_labels = data['val_labels']
-    test_labels = data['test_labels']
-    train_nodes = data['train_nodes']
-    val_nodes = data['val_nodes']
-    test_nodes = data['test_nodes']
+    train_adj_list = data["train_adj_list"]
+    val_adj_list = data["val_adj_list"]
+    test_adj_list = data["test_adj_list"]
+    train_feat = data["train_feat"]
+    val_feat = data["val_feat"]
+    test_feat = data["test_feat"]
+    train_labels = data["train_labels"]
+    val_labels = data["val_labels"]
+    test_labels = data["test_labels"]
+    train_nodes = data["train_nodes"]
+    val_nodes = data["val_nodes"]
+    test_nodes = data["test_nodes"]
 
     return (
         train_adj_list,
@@ -569,7 +579,8 @@ def load_ppi_from_disk(normalize_adj=True):
         test_nodes,
     )
 
-def load_data(path, name):
+
+def load_reddit_example(path, name):
     # dataset = AttributedGraphDataset(root=root, name=name)
     # print('wait')
 
@@ -584,19 +595,25 @@ def load_data(path, name):
     from torch_geometric.loader import NeighborLoader
     from torch_geometric.nn import SAGEConv
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = Reddit(path)
 
     # Already send node features/labels to GPU for faster access during sampling:
-    data = dataset[0].to(device, 'x', 'y')
+    data = dataset[0].to(device, "x", "y")
 
-    kwargs = {'batch_size': 1024, 'num_workers': 6, 'persistent_workers': True}
-    train_loader = NeighborLoader(data, input_nodes=data.train_mask,
-                                  num_neighbors=[25, 10], shuffle=True, **kwargs)
+    kwargs = {"batch_size": 1024, "num_workers": 6, "persistent_workers": True}
+    train_loader = NeighborLoader(
+        data,
+        input_nodes=data.train_mask,
+        num_neighbors=[25, 10],
+        shuffle=True,
+        **kwargs,
+    )
 
-    subgraph_loader = NeighborLoader(copy.copy(data), input_nodes=None,
-                                     num_neighbors=[-1], shuffle=False, **kwargs)
+    subgraph_loader = NeighborLoader(
+        copy.copy(data), input_nodes=None, num_neighbors=[-1], shuffle=False, **kwargs
+    )
 
     # No need to maintain these features during evaluation:
     del subgraph_loader.data.x, subgraph_loader.data.y
@@ -622,7 +639,7 @@ def load_data(path, name):
         @torch.no_grad()
         def inference(self, x_all, subgraph_loader):
             pbar = tqdm(total=len(subgraph_loader.dataset) * len(self.convs))
-            pbar.set_description('Evaluating')
+            pbar.set_description("Evaluating")
 
             # Compute representations of nodes layer by layer, using *all*
             # available edges. This leads to faster computation in contrast to
@@ -634,7 +651,7 @@ def load_data(path, name):
                     x = conv(x, batch.edge_index.to(device))
                     if i < len(self.convs) - 1:
                         x = x.relu_()
-                    xs.append(x[:batch.batch_size].cpu())
+                    xs.append(x[: batch.batch_size].cpu())
                     pbar.update(batch.batch_size)
                 x_all = torch.cat(xs, dim=0)
             pbar.close()
@@ -646,13 +663,13 @@ def load_data(path, name):
     def train(epoch):
         model.train()
         pbar = tqdm(total=int(len(train_loader.dataset)))
-        pbar.set_description(f'Epoch {epoch:02d}')
+        pbar.set_description(f"Epoch {epoch:02d}")
 
         total_loss = total_correct = total_examples = 0
         for batch in train_loader:
             optimizer.zero_grad()
-            y = batch.y[:batch.batch_size]
-            y_hat = model(batch.x, batch.edge_index.to(device))[:batch.batch_size]
+            y = batch.y[: batch.batch_size]
+            y_hat = model(batch.x, batch.edge_index.to(device))[: batch.batch_size]
             loss = F.cross_entropy(y_hat, y)
             loss.backward()
             optimizer.step()
@@ -678,23 +695,182 @@ def load_data(path, name):
 
     for epoch in range(1, 11):
         loss, acc = train(epoch)
-        print(f'Epoch {epoch:02d}, Loss: {loss:.4f}, Approx. Train: {acc:.4f}')
+        print(f"Epoch {epoch:02d}, Loss: {loss:.4f}, Approx. Train: {acc:.4f}")
         train_acc, val_acc, test_acc = test()
-        print(f'Epoch: {epoch:02d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, '
-              f'Test: {test_acc:.4f}')
+        print(
+            f"Epoch: {epoch:02d}, Train: {train_acc:.4f}, Val: {val_acc:.4f}, "
+            f"Test: {test_acc:.4f}"
+        )
+
+def load_graphsaint_example():
+    import argparse
+    import os.path as osp
+
+    import torch
+    import torch.nn.functional as F
+
+    from torch_geometric.datasets import Flickr
+    from torch_geometric.loader import GraphSAINTRandomWalkSampler
+    from torch_geometric.nn import GraphConv
+    from torch_geometric.utils import degree
+
+    path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Flickr')
+    dataset = Flickr(path)
+    data = dataset[0]
+    row, col = data.edge_index
+    data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--use_normalization', action='store_true')
+    args = parser.parse_args()
+    args.use_normalization = True
+
+    loader = GraphSAINTRandomWalkSampler(data, batch_size=6000, walk_length=2,
+                                         num_steps=5, sample_coverage=100,
+                                         save_dir=dataset.processed_dir,
+                                         num_workers=4)
+
+    class Net(torch.nn.Module):
+        def __init__(self, hidden_channels):
+            super().__init__()
+            in_channels = dataset.num_node_features
+            out_channels = dataset.num_classes
+            self.conv1 = GraphConv(in_channels, hidden_channels)
+            self.conv2 = GraphConv(hidden_channels, hidden_channels)
+            self.conv3 = GraphConv(hidden_channels, hidden_channels)
+            self.lin = torch.nn.Linear(3 * hidden_channels, out_channels)
+
+        def set_aggr(self, aggr):
+            self.conv1.aggr = aggr
+            self.conv2.aggr = aggr
+            self.conv3.aggr = aggr
+
+        def forward(self, x0, edge_index, edge_weight=None):
+            x1 = F.relu(self.conv1(x0, edge_index, edge_weight))
+            x1 = F.dropout(x1, p=0.2, training=self.training)
+            x2 = F.relu(self.conv2(x1, edge_index, edge_weight))
+            x2 = F.dropout(x2, p=0.2, training=self.training)
+            x3 = F.relu(self.conv3(x2, edge_index, edge_weight))
+            x3 = F.dropout(x3, p=0.2, training=self.training)
+            x = torch.cat([x1, x2, x3], dim=-1)
+            x = self.lin(x)
+            return x.log_softmax(dim=-1)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = Net(hidden_channels=256).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+    def train():
+        model.train()
+        model.set_aggr('add' if args.use_normalization else 'mean')
+
+        total_loss = total_examples = 0
+        for data in loader:
+            data = data.to(device)
+            optimizer.zero_grad()
+
+            if args.use_normalization:
+                edge_weight = data.edge_norm * data.edge_weight
+                out = model(data.x, data.edge_index, edge_weight)
+                loss = F.nll_loss(out, data.y, reduction='none')
+                loss = (loss * data.node_norm)[data.train_mask].sum()
+            else:
+                out = model(data.x, data.edge_index)
+                loss = F.nll_loss(out[data.train_mask], data.y[data.train_mask])
+
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item() * data.num_nodes
+            total_examples += data.num_nodes
+        return total_loss / total_examples
+
+
+    @torch.no_grad()
+    def test():
+        model.eval()
+        model.set_aggr('mean')
+
+        total_train_acc = total_val_acc = total_test_acc = total_examples = 0
+        for data in loader:
+            out = model(data.x.to(device), data.edge_index.to(device))
+            pred = out.argmax(dim=-1)
+            correct = pred.eq(data.y.to(device))
+
+            total_train_acc += correct[data['train_mask']].sum().item() \
+                               / data['train_mask'].sum().item() * data.num_nodes
+            total_val_acc += correct[data['val_mask']].sum().item() \
+                             / data['val_mask'].sum().item() * data.num_nodes
+            total_test_acc += correct[data['test_mask']].sum().item() \
+                              / data['test_mask'].sum().item() * data.num_nodes
+            total_examples += data.num_nodes
+        train_acc = total_train_acc / total_examples
+        val_acc = total_val_acc / total_examples
+        test_acc = total_test_acc / total_examples
+        return [train_acc, val_acc, test_acc]
+
+    @torch.no_grad()
+    def test_og():
+        model.eval()
+        model.set_aggr('mean')
+        print(len(data.x))
+        out = model(data.x.to(device), data.edge_index.to(device))
+        pred = out.argmax(dim=-1)
+        correct = pred.eq(data.y.to(device))
+
+        accs = []
+        for _, mask in data('train_mask', 'val_mask', 'test_mask'):
+            accs.append(correct[mask].sum().item() / mask.sum().item())
+        return accs
+
+    print(args.use_normalization)
+    for epoch in range(1, 51):
+        loss = train()
+        accs = test()
+        print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {accs[0]:.4f}, '
+              f'Val: {accs[1]:.4f}, Test: {accs[2]:.4f}')
+
+def load_data_transductive(name, dataloader, path):
+    """
+    Loads data, splits it, creates a dataloader per split and converts to
+    torch sparse tensors.
+
+    All under the transductive setting, so during training both val
+    and test nodes are seen, but the loss is only applied to train nodes
+
+    Args:
+        name:
+        dataloader:
+        path:
+    """
+    # Load data
+    data = pygeo_datasets.__dict__[name](path)[0]
+    row, col = data.edge_index
+    data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
+
+    loader = pygeo_loaders.__dict__[dataloader](
+        data, batch_size=6000, walk_length=2,
+        num_steps=5, sample_coverage=100,
+        save_dir=path,
+        num_workers=4
+    )
+
+    # return train_adj, val_adj, test_adj, train_feat, val_feat, test_feat, \
+    #        train_labels, val_labels, test_labels, train_nodes, val_nodes, test_nodes,
+    return loader
 
 def load_social(dataset):
-    edge_file = open(r"data/{}.edge".format(dataset), 'r')
-    attri_file = open(r"data/{}.node".format(dataset), 'r')
+    edge_file = open(r"data/{}.edge".format(dataset), "r")
+    attri_file = open(r"data/{}.node".format(dataset), "r")
     edges = edge_file.readlines()
     attributes = attri_file.readlines()
-    node_num = int(edges[0].split('\t')[1].strip())
-    edge_num = int(edges[1].split('\t')[1].strip())
-    attribute_number = int(attributes[1].split('\t')[1].strip())
+    node_num = int(edges[0].split("\t")[1].strip())
+    edge_num = int(edges[1].split("\t")[1].strip())
+    attribute_number = int(attributes[1].split("\t")[1].strip())
     print(
-        "dataset:{}, node_num:{},edge_num:{},attribute_num:{}".format(dataset, node_num,
-                                                                      edge_num,
-                                                                      attribute_number))
+        "dataset:{}, node_num:{},edge_num:{},attribute_num:{}".format(
+            dataset, node_num, edge_num, attribute_number
+        )
+    )
     edges.pop(0)
     edges.pop(0)
     attributes.pop(0)
@@ -703,31 +879,46 @@ def load_social(dataset):
     adj_col = []
 
     for line in edges:
-        node1 = int(line.split('\t')[0].strip())
-        node2 = int(line.split('\t')[1].strip())
+        node1 = int(line.split("\t")[0].strip())
+        node2 = int(line.split("\t")[1].strip())
         adj_row.append(node1)
         adj_col.append(node2)
-    adj = sp.csc_matrix((np.ones(edge_num), (adj_row, adj_col)),
-                        shape=(node_num, node_num))
+    adj = sp.csc_matrix(
+        (np.ones(edge_num), (adj_row, adj_col)), shape=(node_num, node_num)
+    )
 
     att_row = []
     att_col = []
     for line in attributes:
-        node1 = int(line.split('\t')[0].strip())
-        attribute1 = int(line.split('\t')[1].strip())
+        node1 = int(line.split("\t")[0].strip())
+        attribute1 = int(line.split("\t")[1].strip())
         att_row.append(node1)
         att_col.append(attribute1)
-    features = sp.csc_matrix((np.ones(len(att_row)), (att_row, att_col)),
-                              shape=(node_num, attribute_number))
+    features = sp.csc_matrix(
+        (np.ones(len(att_row)), (att_row, att_col)), shape=(node_num, attribute_number)
+    )
 
     adj_orig = adj
-    adj_orig = adj_orig - sp.dia_matrix((adj_orig.diagonal()[np.newaxis, :], [0]),
-                                        shape=adj_orig.shape)
+    adj_orig = adj_orig - sp.dia_matrix(
+        (adj_orig.diagonal()[np.newaxis, :], [0]), shape=adj_orig.shape
+    )
     adj_orig.eliminate_zeros()
-    adj_train, train_edges, val_edges, val_edges_false, \
-    test_edges, test_edges_false = mask_test_edges(adj)
-    fea_train, train_feas, val_feas, val_feas_false, \
-    test_feas, test_feas_false = mask_test_feas(features)
+    (
+        adj_train,
+        train_edges,
+        val_edges,
+        val_edges_false,
+        test_edges,
+        test_edges_false,
+    ) = mask_test_edges(adj)
+    (
+        fea_train,
+        train_feas,
+        val_feas,
+        val_feas_false,
+        test_feas,
+        test_feas_false,
+    ) = mask_test_feas(features)
 
     adj = adj_train
     features_orig = features
@@ -739,7 +930,7 @@ def load_social(dataset):
     features = sparse_to_tuple(features.tocoo())
     num_features = features[2][1]
     features_nonzero = features[1].shape[0]
-    
+
     return adj, features
 
 
@@ -752,12 +943,12 @@ def mask_test_edges(adj):
         edges.append([adj_row[i], adj_col[i]])
         edges_dic[(adj_row[i], adj_col[i])] = 1
     false_edges_dic = {}
-    num_test = int(np.floor(len(edges) / 10.))
-    num_val = int(np.floor(len(edges) / 20.))
+    num_test = int(np.floor(len(edges) / 10.0))
+    num_val = int(np.floor(len(edges) / 20.0))
     all_edge_idx = np.arange(len(edges))
     np.random.shuffle(all_edge_idx)
     val_edge_idx = all_edge_idx[:num_val]
-    test_edge_idx = all_edge_idx[num_val:(num_val + num_test)]
+    test_edge_idx = all_edge_idx[num_val : (num_val + num_test)]
     edges = np.array(edges)
     test_edges = edges[test_edge_idx]
     val_edges = edges[val_edge_idx]
@@ -792,10 +983,18 @@ def mask_test_edges(adj):
                     test_edges_false.append([i, j])
 
     data = np.ones(train_edges.shape[0])
-    adj_train = sp.csr_matrix((data, (train_edges[:, 0], train_edges[:, 1])),
-                              shape=adj.shape)
+    adj_train = sp.csr_matrix(
+        (data, (train_edges[:, 0], train_edges[:, 1])), shape=adj.shape
+    )
     adj_train = adj_train + adj_train.T
-    return adj_train, train_edges, val_edges, val_edges_false, test_edges, test_edges_false
+    return (
+        adj_train,
+        train_edges,
+        val_edges,
+        val_edges_false,
+        test_edges,
+        test_edges_false,
+    )
 
 
 def mask_test_feas(features):
@@ -807,12 +1006,12 @@ def mask_test_feas(features):
         feas.append([fea_row[i], fea_col[i]])
         feas_dic[(fea_row[i], fea_col[i])] = 1
     false_feas_dic = {}
-    num_test = int(np.floor(len(feas) / 10.))
-    num_val = int(np.floor(len(feas) / 20.))
+    num_test = int(np.floor(len(feas) / 10.0))
+    num_val = int(np.floor(len(feas) / 20.0))
     all_fea_idx = np.arange(len(feas))
     np.random.shuffle(all_fea_idx)
     val_fea_idx = all_fea_idx[:num_val]
-    test_fea_idx = all_fea_idx[num_val:(num_val + num_test)]
+    test_fea_idx = all_fea_idx[num_val : (num_val + num_test)]
     feas = np.array(feas)
     test_feas = feas[test_fea_idx]
     val_feas = feas[val_fea_idx]
@@ -841,10 +1040,10 @@ def mask_test_feas(features):
                 if len(test_feas_false) < num_test:
                     test_feas_false.append([i, j])
     data = np.ones(train_feas.shape[0])
-    fea_train = sp.csr_matrix((data, (train_feas[:, 0], train_feas[:, 1])),
-                              shape=features.shape)
+    fea_train = sp.csr_matrix(
+        (data, (train_feas[:, 0], train_feas[:, 1])), shape=features.shape
+    )
     return fea_train, train_feas, val_feas, val_feas_false, test_feas, test_feas_false
-
 
 
 def str2bool(v):
@@ -857,6 +1056,8 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
-if __name__ == '__main__':
-    root = '/vol/research/sceneEvolution/data/graph_data'
-    load_data(root, 'Flickr')
+
+if __name__ == "__main__":
+    root = "/vol/research/sceneEvolution/data/graph_data"
+    # load_data_transductive('Reddit', 'GraphSAINTRandomWalkSampler', root)
+    load_graphsaint_example()
