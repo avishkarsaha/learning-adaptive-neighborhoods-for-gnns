@@ -26,7 +26,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="050722_citesser_gcn_noise0.05",
+    default="050722_citeseer_gcniidgg_noise0.1",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -54,11 +54,11 @@ parser.add_argument("--variant", type=str2bool, default=False, help="GCN* model.
 parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
-parser.add_argument("--model", type=str, default="GCN", help="model name")
+parser.add_argument("--model", type=str, default="GCNII_DGG", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.0005,
+    default=0.001,
     help="percentage of noisy edges to add",
 )
 # Differentiable graph generator specific

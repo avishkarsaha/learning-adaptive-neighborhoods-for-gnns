@@ -32,26 +32,29 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="temp", help="experiment name"
+    "--expname", type=str, default="120722_flickr_gcndgg", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
-    "--epochs", type=int, default=8000, help="Number of epochs to train."
+    "--epochs", type=int, default=5000, help="Number of epochs to train."
 )
-parser.add_argument("--lr", type=float, default=0.001, help="Initial learning rate.")
+parser.add_argument("--lr", type=float, default=0.01, help="learning rate.")
 parser.add_argument(
-    "--wd", type=float, default=0, help="Weight decay (L2 loss on parameters)."
+    "--wd1", type=float, default=0.01, help="weight decay (L2 loss on parameters)."
 )
-parser.add_argument("--layer", type=int, default=9, help="Number of hidden layers.")
-parser.add_argument("--hidden", type=int, default=2048, help="Number of hidden layers.")
 parser.add_argument(
-    "--dropout", type=float, default=0.2, help="Dropout rate (1 - keep probability)."
+    "--wd2", type=float, default=5e-4, help="weight decay (L2 loss on parameters)."
+)
+parser.add_argument("--layer", type=int, default=64, help="Number of layers.")
+parser.add_argument("--hidden", type=int, default=64, help="hidden dimensions.")
+parser.add_argument(
+    "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="ppi", help="dateset")
+parser.add_argument("--data", default="citeseer", help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
-parser.add_argument("--alpha", type=float, default=0.5, help="alpha_l")
-parser.add_argument("--lamda", type=float, default=1, help="lamda.")
+parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
+parser.add_argument("--lamda", type=float, default=0.5, help="lamda.")
 parser.add_argument("--variant", type=str2bool, default=False, help="GCN* model.")
 parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
@@ -244,10 +247,12 @@ def train(args, model, optimizer, loader, device, epoch, writer):
             loss = F.nll_loss(out, data.y, reduction='none')
             loss = (loss * data.node_norm)[data.train_mask].sum()
         else:
-            output = model(batch_feature, batch_adj, writer, epoch)
-            loss_train = loss_fcn(
-                output[data.train_mask], batch_label[data.train_mask]
-            )
+            output = model(batch_feature, batch_adj, epoch, writer)
+            loss = F.nll_loss(output[data.train_mask], batch_label[data.train_mask])
+            # loss = loss_fcn(
+            #     output[data.train_mask],
+            #     F.one_hot(batch_label[data.train_mask], output.shape[-1]).float()
+            # )
             acc_train = accuracy(
                 output[data.train_mask], batch_label[data.train_mask]
             )
@@ -259,49 +264,14 @@ def train(args, model, optimizer, loader, device, epoch, writer):
         total_examples += data.num_nodes
     loss_train = total_loss / total_examples
     acc_train = total_acc / total_examples
-    return loss_train.item(), acc_train.item()
-
-def train_debug(
-    args, model, optimizer, features, adj, labels, idx_train, device, epoch, writer
-):
-    model.train()
-    optimizer.zero_grad()
-    output = model(features, adj, epoch, writer)
-    acc_train = accuracy(output[idx_train], labels[idx_train].to(device))
-    loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
-    loss_train.backward()
-
-    # k_net_grads =  torch.cat(
-    #     [p.grad.flatten() for name, p in model.dggs.named_parameters()
-    #      if 'input_degree' in name and p.grad is not None]
-    # ).flatten()
-    # convs_grads = torch.cat(
-    #     [p.grad.flatten() for name, p in model.fcs[0].named_parameters()
-    #      if p.grad is not None]
-    # ).flatten()
-    # # writer.add_histogram('train/in_deg_grad', k_net_grads, epoch)
-    # writer.add_histogram('train/fcs_grad', convs_grads, epoch)
-
-    # print('k grad', float(k_net_grads.mean()))
-    # print('fcs grad', float(convs_grads.mean()))
-
-    # if args.grad_clip != -1:
-    #     torch.nn.utils.clip_grad_norm_(
-    #         model.dggs.parameters(), max_norm=args.grad_clip
-    #     )
-    #
-    # for name, p in model.dggs.named_parameters():
-    #     print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
-
-    optimizer.step()
-    return loss_train.item(), acc_train.item()
+    return loss_train, acc_train
 
 
 @torch.no_grad()
 def validate(args, model, loader, device, epoch, writer):
     model.eval()
 
-    total_train_acc = total_examples = 0
+    total_test_acc = total_examples = 0
     for data in loader:
         data = data.to(device)
         batch_adj = to_scipy_sparse_matrix(
@@ -311,7 +281,7 @@ def validate(args, model, loader, device, epoch, writer):
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
-        out = model(batch_feature, batch_adj, writer, epoch)
+        out = model(batch_feature, batch_adj, epoch, writer)
         pred = out.argmax(dim=-1)
         correct = pred.eq(data.y.to(device))
 
@@ -320,14 +290,14 @@ def validate(args, model, loader, device, epoch, writer):
         total_examples += data.num_nodes
 
     test_acc = total_test_acc / total_examples
-    return _, test_acc
+    return None, test_acc
 
 
 @torch.no_grad()
 def test(args, model, loader, device, epoch, writer):
     model.eval()
 
-    total_train_acc = total_examples = 0
+    total_test_acc = total_examples = 0
     for data in loader:
         data = data.to(device)
         batch_adj = to_scipy_sparse_matrix(
@@ -337,7 +307,7 @@ def test(args, model, loader, device, epoch, writer):
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
-        out = model(batch_feature, batch_adj, writer, epoch)
+        out = model(batch_feature, batch_adj, epoch, writer)
         pred = out.argmax(dim=-1)
         correct = pred.eq(data.y.to(device))
 
@@ -346,7 +316,7 @@ def test(args, model, loader, device, epoch, writer):
         total_examples += data.num_nodes
 
     test_acc = total_test_acc / total_examples
-    return _, test_acc
+    return None, test_acc
 
 
 def test_best(
@@ -438,7 +408,22 @@ if __name__ == "__main__":
     ).to(device)
     loss_fcn = torch.nn.BCELoss()
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    if "GCNII" in args.model:
+        optimizer = optim.Adam(
+            [
+                {"params": model.params1, "weight_decay": args.wd1},
+                {"params": model.params2, "weight_decay": args.wd2},
+            ],
+            lr=args.lr,
+        )
+    else:
+        optimizer = optim.Adam(
+            [
+                dict(params=model.params1, weight_decay=5e-4),
+                dict(params=model.params2, weight_decay=0),
+            ],
+            lr=args.lr,
+        )  # Only perform weight-decay on first convolution.
 
     # Run
     t_total = time.time()
@@ -462,13 +447,11 @@ if __name__ == "__main__":
                 "train",
                 "loss:{:.3f}".format(loss_tra),
                 "| val",
-                "loss:{:.3f}".format(loss_val),
-                "f1:{:.3f}".format(acc_val * 100),
+                "f1:{:.3f}".format(acc_test * 100),
             )
 
             writer.add_scalar("train/loss", loss_tra, epoch)
             writer.add_scalar("train/acc", acc_tra, epoch)
-            writer.add_scalar("val/loss", loss_val, epoch)
             writer.add_scalar("val/acc", acc_val, epoch)
             writer.add_scalar("test/acc", acc_test, epoch)
 
