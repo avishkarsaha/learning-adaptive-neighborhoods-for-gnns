@@ -393,6 +393,7 @@ if __name__ == "__main__":
                                          num_workers=4)
     cudaid = "cuda"
     device = torch.device(cudaid)
+    print('loaded data')
 
     # Load model
     model = models.__dict__[args.model](

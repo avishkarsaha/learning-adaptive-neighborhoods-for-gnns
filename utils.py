@@ -10,6 +10,7 @@ import networkx as nx
 import json
 from networkx.readwrite import json_graph
 import pdb
+import torch.nn as nn
 from torch_geometric.datasets import AttributedGraphDataset
 import torch_geometric.datasets as pygeo_datasets
 import torch_geometric.loader as pygeo_loaders
@@ -714,7 +715,9 @@ def load_graphsaint_example():
     from torch_geometric.nn import GraphConv
     from torch_geometric.utils import degree
 
-    path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Flickr')
+    # path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'Flickr')
+    path = "/vol/research/sceneEvolution/data/graph_data/Flickr"
+    print(path)
     dataset = Flickr(path)
     data = dataset[0]
     row, col = data.edge_index
@@ -723,9 +726,9 @@ def load_graphsaint_example():
     parser = argparse.ArgumentParser()
     parser.add_argument('--use_normalization', action='store_true')
     args = parser.parse_args()
-    args.use_normalization = True
+    args.use_normalization = False
 
-    loader = GraphSAINTRandomWalkSampler(data, batch_size=6000, walk_length=2,
+    loader = GraphSAINTRandomWalkSampler(data, batch_size=3000, walk_length=2,
                                          num_steps=5, sample_coverage=100,
                                          save_dir=dataset.processed_dir,
                                          num_workers=4)
@@ -756,13 +759,74 @@ def load_graphsaint_example():
             x = self.lin(x)
             return x.log_softmax(dim=-1)
 
+    class GCNConv(nn.Module):
+        def __init__(self, in_channels, out_channels, A=None, cached=False):
+            super(GCNConv, self).__init__()
+            self.W = nn.Parameter(
+                torch.rand(in_channels, out_channels, requires_grad=True))
+
+        def forward(self, x, adj):
+
+            Ax = torch.mm(adj, x)
+            # print('Ax mu: {:.3f} std: {:.3f}'.format(Ax.mean().item(), Ax.std().item()),)
+            AxW = torch.mm(Ax, self.W)
+            # print('AxW mu: {:.3f} std: {:.3f}'.format(AxW.mean().item(), AxW.std().item()), )
+            out = torch.relu(AxW)
+            return out
+
+    class GCN(torch.nn.Module):
+        def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, **kwargs):
+            super(GCN, self).__init__()
+            self.conv1 = GCNConv(nfeat, nhidden)
+            self.conv2 = GCNConv(nhidden, nclass)
+
+            self.params1 = list(self.conv1.parameters())
+            self.params2 = list(self.conv2.parameters())
+
+        def normalize_adj(self, A):
+            # assert no self loops
+            assert A[torch.arange(len(A)), torch.arange(len(A))].sum() == 0
+
+            # add self loops
+            A_hat = A + torch.eye(A.size(0), device=A.device)
+            D = torch.diag(torch.sum(A_hat, 1))
+            D = D.inverse().sqrt()
+            A_hat = torch.mm(torch.mm(D, A_hat), D)
+            return A_hat
+
+        def forward(self, x, edge_index):
+            adj = to_scipy_sparse_matrix(
+                edge_index=edge_index, num_nodes=len(x)
+            )
+            adj = sparse_mx_to_torch_sparse_tensor(adj).to(device)
+
+            adj = adj.to_dense()
+            adj = self.normalize_adj(adj)
+
+            x = F.dropout(self.conv1(x, adj), training=self.training)
+            x = self.conv2(x, adj)
+            out = F.log_softmax(x, dim=-1)
+            return out
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = Net(hidden_channels=256).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    # model = Net(hidden_channels=256).to(device)
+    model = GCN(
+        nfeat=dataset.num_node_features,
+        nhidden=64,
+        nclass=dataset.num_classes
+    ).to(device)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(
+        [
+            dict(params=model.params1, weight_decay=5e-4),
+            dict(params=model.params2, weight_decay=0),
+        ],
+        lr=0.01,
+    )  # Only perform weight-decay on first convolution.
 
     def train():
         model.train()
-        model.set_aggr('add' if args.use_normalization else 'mean')
+        # model.set_aggr('add' if args.use_normalization else 'mean')
 
         total_loss = total_examples = 0
         for data in loader:
@@ -788,7 +852,7 @@ def load_graphsaint_example():
     @torch.no_grad()
     def test():
         model.eval()
-        model.set_aggr('mean')
+        # model.set_aggr('mean')
 
         total_train_acc = total_val_acc = total_test_acc = total_examples = 0
         for data in loader:
@@ -803,6 +867,14 @@ def load_graphsaint_example():
             total_test_acc += correct[data['test_mask']].sum().item() \
                               / data['test_mask'].sum().item() * data.num_nodes
             total_examples += data.num_nodes
+
+            # print(correct[data['train_mask']].sum().item() \
+            #                    / data['train_mask'].sum().item())
+            # print(correct[data['val_mask']].sum().item() \
+            #                  / data['val_mask'].sum().item())
+            # print(correct[data['test_mask']].sum().item() \
+            #                   / data['test_mask'].sum().item())
+
         train_acc = total_train_acc / total_examples
         val_acc = total_val_acc / total_examples
         test_acc = total_test_acc / total_examples
@@ -811,7 +883,7 @@ def load_graphsaint_example():
     @torch.no_grad()
     def test_og():
         model.eval()
-        model.set_aggr('mean')
+        # model.set_aggr('mean')
         print(len(data.x))
         out = model(data.x.to(device), data.edge_index.to(device))
         pred = out.argmax(dim=-1)
