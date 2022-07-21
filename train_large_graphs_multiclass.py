@@ -33,7 +33,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="180722_yelp_gcn_noise0", help="experiment name"
+    "--expname", type=str, default="210722_yelp_gcn_noise0", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -64,7 +64,7 @@ parser.add_argument(
     "--use_normalization", type=str2bool, default=False,
     help="use normalization constants from graphsaint"
 )
-parser.add_argument("--model", type=str, default="GCN", help="model name")
+parser.add_argument("--model", type=str, default="GCN_MultiClass", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
@@ -219,12 +219,10 @@ def train(args, model, optimizer, loader, device, epoch, writer):
 
         # forward pass
         output = model(batch_feature, batch_adj, epoch, writer)
-        loss = F.nll_loss(output[data.train_mask], batch_label[data.train_mask])
-        # loss = loss_fcn(
-        #     output[data.train_mask],
-        #     F.one_hot(batch_label[data.train_mask], output.shape[-1]).float()
-        # )
-        acc_train = accuracy(
+        loss = F.binary_cross_entropy(
+            output[data.train_mask], batch_label[data.train_mask]
+        )
+        acc_train = evaluate(
             output[data.train_mask], batch_label[data.train_mask]
         )
 
@@ -244,18 +242,6 @@ def validate(args, model, loader, device, epoch, writer):
 
     total_test_acc = total_examples = 0
     for data in loader:
-        loss_tra += loss_train.item()
-    loss_tra /= 20
-    acc_tra /= 20
-    return loss_tra, acc_tra
-
-
-def train(args, model, optimizer, loader, device, epoch, writer):
-    model.train()
-
-    total_loss = total_examples = total_acc = 0
-    for data in loader:
-        # parse data
         data = data.to(device)
         batch_adj = to_scipy_sparse_matrix(
             edge_index=data.edge_index, num_nodes=data.num_nodes
@@ -268,40 +254,11 @@ def train(args, model, optimizer, loader, device, epoch, writer):
         batch_label = data.y.to(device)
 
         out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
-        correct = pred.eq(batch_label)
-
-        total_test_acc += correct[data['val_mask']].sum().item() \
-                          / data['val_mask'].sum().item() * data.num_nodes
-        total_examples += data.num_nodes
-
-    test_acc = total_test_acc / total_examples
-    return None, test_acc
-
-
-@torch.no_grad()
-def validate(args, model, loader, device, epoch, writer):
-    model.eval()
-
-    total_test_acc = total_examples = 0
-    for data in loader:
-        data = data.to(device)
-        batch_adj = to_scipy_sparse_matrix(
-            edge_index=data.edge_index, num_nodes=data.num_nodes
+        acc_test = evaluate(
+            out[data.val_mask], batch_label[data.val_mask]
         )
-        if args.edge_noise_level > 0.0:
-            batch_adj = add_noisy_edges(batch_adj, noise_level=args.edge_noise_level)
 
-        batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
-        batch_feature = data.x.to(device)
-        batch_label = data.y.to(device)
-
-        out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
-        correct = pred.eq(batch_label)
-
-        total_test_acc += correct[data['val_mask']].sum().item() \
-                          / data['val_mask'].sum().item() * data.num_nodes
+        total_test_acc += acc_test * data.num_nodes
         total_examples += data.num_nodes
 
     test_acc = total_test_acc / total_examples
@@ -323,11 +280,11 @@ def test(args, model, loader, device, epoch, writer):
         batch_label = data.y.to(device)
 
         out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
-        correct = pred.eq(data.y.to(device))
+        acc_test = evaluate(
+            out[data.test_mask], batch_label[data.test_mask]
+        )
 
-        total_test_acc += correct[data['test_mask']].sum().item() \
-                          / data['test_mask'].sum().item() * data.num_nodes
+        total_test_acc += acc_test * data.num_nodes
         total_examples += data.num_nodes
 
     test_acc = total_test_acc / total_examples
@@ -355,14 +312,11 @@ def test_best(
 
 
 # adapted from DGL
-def evaluate(feats, model, mask, subgraph, labels, loss_fcn):
-    model.eval()
+def evaluate(output, labels):
     with torch.no_grad():
-        output = model(feats, subgraph)
-        loss_data = loss_fcn(output[mask], labels[mask].float())
-        predict = np.where(output[mask].data.cpu().numpy() > 0.5, 1, 0)
-        score = f1_score(labels[mask].data.cpu().numpy(), predict, average="micro")
-        return score, loss_data.item()
+        predict = (output > 0.5).float()
+        score = f1_score(labels.cpu().numpy(), predict.cpu().numpy(), average="micro")
+        return score
 
 
 if __name__ == "__main__":

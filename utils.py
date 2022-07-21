@@ -874,7 +874,6 @@ def load_graphsaint_example():
             #                  / data['val_mask'].sum().item())
             # print(correct[data['test_mask']].sum().item() \
             #                   / data['test_mask'].sum().item())
-
         train_acc = total_train_acc / total_examples
         val_acc = total_val_acc / total_examples
         test_acc = total_test_acc / total_examples

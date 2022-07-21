@@ -543,6 +543,9 @@ class GCNIIppi_DGG(nn.Module):
 
 
 class GCN(torch.nn.Module):
+    """
+    GCN for binary node classification
+    """
     def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, **kwargs):
         super(GCN, self).__init__()
         self.conv1 = GCNConv(nfeat, nhidden)
@@ -553,7 +556,8 @@ class GCN(torch.nn.Module):
 
     def normalize_adj(self, A):
         # assert no self loops
-        assert A[torch.arange(len(A)), torch.arange(len(A))].sum() == 0
+        if A[torch.arange(len(A)), torch.arange(len(A))].sum() != 0:
+            A[torch.arange(len(A)), torch.arange(len(A))] = 0
 
         # add self loops
         A_hat = A + torch.eye(A.size(0), device=A.device)
@@ -591,6 +595,62 @@ class GCN(torch.nn.Module):
             # )
 
         out = F.log_softmax(x, dim=-1)
+        return out
+
+
+class GCN_MultiClass(torch.nn.Module):
+    """
+    GCN for multi-label node classification
+    """
+    def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, **kwargs):
+        super(GCN_MultiClass, self).__init__()
+        self.conv1 = GCNConv(nfeat, nhidden)
+        self.conv2 = GCNConv(nhidden, nclass)
+
+        self.params1 = list(self.conv1.parameters())
+        self.params2 = list(self.conv2.parameters())
+
+    def normalize_adj(self, A):
+        # assert no self loops
+        if A[torch.arange(len(A)), torch.arange(len(A))].sum() != 0:
+            A[torch.arange(len(A)), torch.arange(len(A))] = 0
+
+        # add self loops
+        A_hat = A + torch.eye(A.size(0), device=A.device)
+        D = torch.diag(torch.sum(A_hat, 1))
+        D = D.inverse().sqrt()
+        A_hat = torch.mm(torch.mm(D, A_hat), D)
+        return A_hat
+
+    def forward(self, x, adj, epoch=None, writer=None):
+        """
+        Args:
+            x: node features
+            A: sparse unnormalized adjacency matrix without self loops
+            epoch: epoch number
+            writer: tensorboard summary writer
+
+        Returns:
+            out: class predictions for each node
+        """
+        adj = adj.to_dense()
+        adj = self.normalize_adj(adj)
+
+        x = F.dropout(self.conv1(x, adj), training=self.training)
+        if writer is not None:
+            writer.add_histogram("gcn_conv1_dist", x, epoch)
+            # print(
+            #     "conv1 mu: {:.5f} std: {:.5f}".format(x.mean().item(), x.std().item())
+            # )
+
+        x = self.conv2(x, adj)
+        if writer is not None:
+            writer.add_histogram("gcn_conv2_dist", x, epoch)
+            # print(
+            #     'conv2 mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item())
+            # )
+
+        out = x.sigmoid()
         return out
 
 
