@@ -19,7 +19,7 @@ import torch.nn as nn
 from torch_geometric.utils import to_scipy_sparse_matrix
 import torch_geometric.datasets as pygeo_datasets
 
-from torch_geometric.loader import GraphSAINTRandomWalkSampler
+import torch_geometric.loader as dataloaders
 from torch_geometric.nn import GraphConv
 from torch_geometric.utils import degree
 from sklearn.metrics import f1_score
@@ -53,6 +53,8 @@ parser.add_argument(
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
 parser.add_argument("--data", default="Yelp", help="dateset")
+parser.add_argument("--dataloader", default="GraphSAINTRandomWalkSampler",
+                    help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
 parser.add_argument("--lamda", type=float, default=0.5, help="lamda.")
@@ -365,6 +367,38 @@ def evaluate(feats, model, mask, subgraph, labels, loss_fcn):
         return score, loss_data.item()
 
 
+def load_data():
+    if "DGG" not in args.model:
+        args.pre_normalize_adj = False
+
+    root = "/vol/research/sceneEvolution/data/graph_data/{}".format(args.data)
+    if 'pubmed' in args.data:
+        dataset = pygeo_datasets.__dict__['Planetoid'](
+            root=root, name='PubMed', split='public'
+        )
+        data = dataset[0]
+    else:
+        dataset = pygeo_datasets.__dict__[args.data](root)
+        data = dataset[0]
+
+    if 'SAINT' in args.dataloader:
+        row, col = data.edge_index
+        data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
+
+        loader = GraphSAINTRandomWalkSampler(
+            data, batch_size=args.graphsaint_bs, walk_length=args.graphsaint_wl,
+            num_steps=5, sample_coverage=100,
+            save_dir=dataset.processed_dir,
+            num_workers=4
+        )
+    elif 'Cluster' in args.dataloader:
+        cluster_data = ClusterData(data, num_parts=4, recursive=False,
+                                   save_dir=dataset.processed_dir)
+        train_loader = ClusterLoader(cluster_data, batch_size=20, shuffle=True,
+                                     num_workers=4)
+    return loader
+
+
 if __name__ == "__main__":
 
     args = parser.parse_args()
@@ -394,20 +428,7 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
-    if "DGG" not in args.model:
-        args.pre_normalize_adj = False
-
-    root = "/vol/research/sceneEvolution/data/graph_data/{}".format(args.data)
-    dataset = pygeo_datasets.__dict__[args.data](root)
-    data = dataset[0]
-    row, col = data.edge_index
-    data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
-    loader = GraphSAINTRandomWalkSampler(
-        data, batch_size=args.graphsaint_bs, walk_length=args.graphsaint_wl,
-        num_steps=5, sample_coverage=100,
-        save_dir=dataset.processed_dir,
-        num_workers=4
-    )
+    loader = load_data()
     cudaid = "cuda"
     device = torch.device(cudaid)
 

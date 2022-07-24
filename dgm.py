@@ -1,8 +1,8 @@
 import matplotlib.pyplot as plt
 import torch
 from torch_cluster import fps
-import pytorch3d
-from pytorch3d.ops import sample_farthest_points
+# import pytorch3d
+# from pytorch3d.ops import sample_farthest_points
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib

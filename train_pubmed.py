@@ -314,12 +314,19 @@ if __name__ == "__main__":
         args.pre_normalize_adj = False
     else:
         args.pre_normalize_adj = False
-    adj, features, labels, idx_train, idx_val, idx_test = load_citation(
-        args.data,
-        args.root,
-        normalize_adj=args.pre_normalize_adj,
-        noise=args.edge_noise_level,
+
+    root = "/vol/research/sceneEvolution/data/graph_data/{}".format(args.data)
+    dataset = pygeo_datasets.__dict__['Planetoid'](
+        root=root, name='PubMed', split='public'
     )
+    data = dataset[0]
+
+    cluster_data = ClusterData(data, num_parts=4, recursive=False,
+                               save_dir=dataset.processed_dir)
+    train_loader = ClusterLoader(cluster_data, batch_size=20, shuffle=True,
+                                 num_workers=4)
+
+
     cudaid = "cuda"
     device = torch.device(cudaid)
     features = features.to(device)
