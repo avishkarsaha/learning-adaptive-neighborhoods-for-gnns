@@ -13,6 +13,7 @@ from utils import *
 import model as models
 import uuid
 from torch.utils.tensorboard import SummaryWriter
+import torch_geometric.transforms as T
 import shutil
 
 # Training settings
@@ -26,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220722_pubmed_gcnii_noise0",
+    default="220730_cora_gcndgg_debug",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -46,7 +47,8 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="pubmed", help="dateset")
+parser.add_argument("--data", default="cora", help="dateset")
+parser.add_argument("--split", default="public", help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
 parser.add_argument("--lamda", type=float, default=0.5, help="lamda.")
@@ -54,7 +56,7 @@ parser.add_argument("--variant", type=str2bool, default=False, help="GCN* model.
 parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
-parser.add_argument("--model", type=str, default="GCNII", help="model name")
+parser.add_argument("--model", type=str, default="GCN_DGG", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
@@ -154,7 +156,7 @@ parser.add_argument(
 parser.add_argument(
     "--dgg_mode_k_net",
     type=str,
-    default="pass",
+    default="input_deg",
     choices=["pass", "input_deg", "gcn-x-deg", "x"],
     help="mode for the k_estimate_net in DGG, determines which features are used"
     "in the forward pass",
@@ -162,7 +164,7 @@ parser.add_argument(
 parser.add_argument(
     "--dgg_mode_k_select",
     type=str,
-    default="edge_p-cdf",
+    default="k_only",
     choices=["edge_p-cdf", "k_only", "k_times_edge_prob"],
     help="mode for the k_selector in DGG, determines which features are used"
     "in the forward pass",
@@ -206,69 +208,74 @@ def train(args, model, optimizer, features, adj, labels, idx_train, device):
 
 
 def train_debug(
-    args, model, optimizer, features, adj, labels, idx_train, device, epoch, writer
+    args, model, optimizer, data, device, epoch, writer
 ):
     model.train()
+
+    # parse data
+    data = data.to(device)
+    adj = to_scipy_sparse_matrix(
+        edge_index=data.edge_index, num_nodes=data.num_nodes
+    )
+    if args.edge_noise_level > 0.0:
+        adj = add_noisy_edges(adj, noise_level=args.edge_noise_level)
+
+    adj = sparse_mx_to_torch_sparse_tensor(adj).to(device)
+    features = data.x.to(device)
+    labels = data.y.to(device)
+
     optimizer.zero_grad()
     output = model(features, adj, epoch, writer)
-    acc_train = accuracy(output[idx_train], labels[idx_train].to(device))
-    loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
+    acc_train = accuracy(output[data.train_mask], labels[data.train_mask].to(device))
+    loss_train = F.nll_loss(output[data.train_mask], labels[data.train_mask].to(device))
     loss_train.backward()
-
-    # for name, p in model.dggs[0].named_parameters():
-    #     if 'adj_project' in name:
-    #         writer.add_histogram('adj_proj_w', p.item(), epoch)
-    #         writer.add_histogram('adj_proj_grad', p.grad, epoch)
-    # #
-    # for name, p in model.named_parameters():
-    #     if p.grad is not None:
-    #         print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
-
-    # writer.add_scalar('k_grad_mean', model.dggs[0].k_grad[0].mean(), epoch)
-    # writer.add_scalar('k_grad_std', model.dggs[0].k_grad[0].std(), epoch)
-
-    # k_net_grads =  torch.cat(
-    #     [p.grad.flatten() for name, p in model.dggs.named_parameters()
-    #      if 'input_degree' in name and p.grad is not None]
-    # ).flatten()
-    # convs_grads = torch.cat(
-    #     [p.grad.flatten() for name, p in model.fcs[0].named_parameters()
-    #      if p.grad is not None]
-    # ).flatten()
-    # # writer.add_histogram('train/in_deg_grad', k_net_grads, epoch)
-    # writer.add_histogram('train/fcs_grad', convs_grads, epoch)
-
-    # print('k grad', float(k_net_grads.mean()))
-    # print('fcs grad', float(convs_grads.mean()))
-
-    # if args.grad_clip != -1:
-    #     torch.nn.utils.clip_grad_norm_(
-    #         model.dggs.parameters(), max_norm=args.grad_clip
-    #     )
-    #
-    # for name, p in model.dggs.named_parameters():
-    #     print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
 
     optimizer.step()
     return loss_train.item(), acc_train.item()
 
 
-def validate(model, features, adj, labels, idx_val, device):
+def validate(model, data, device):
     model.eval()
     with torch.no_grad():
+        adj = to_scipy_sparse_matrix(
+            edge_index=data.edge_index, num_nodes=data.num_nodes
+        )
+        if args.edge_noise_level > 0.0:
+            adj = add_noisy_edges(adj, noise_level=args.edge_noise_level)
+
+        adj = sparse_mx_to_torch_sparse_tensor(adj).to(device)
+        features = data.x.to(device)
+        labels = data.y.to(device)
+
         output = model(features, adj)
-        loss_val = F.nll_loss(output[idx_val], labels[idx_val].to(device))
-        acc_val = accuracy(output[idx_val], labels[idx_val].to(device))
+        acc_val = accuracy(output[data.val_mask],
+                             labels[data.val_mask].to(device))
+        loss_val = F.nll_loss(output[data.val_mask],
+                                labels[data.val_mask].to(device))
+
         return loss_val.item(), acc_val.item()
 
 
-def test(model, features, adj, labels, idx_test, device):
+def test(model, data, device):
     model.eval()
     with torch.no_grad():
+        adj = to_scipy_sparse_matrix(
+            edge_index=data.edge_index, num_nodes=data.num_nodes
+        )
+        if args.edge_noise_level > 0.0:
+            adj = add_noisy_edges(adj, noise_level=args.edge_noise_level)
+
+        adj = sparse_mx_to_torch_sparse_tensor(adj).to(device)
+        features = data.x.to(device)
+        labels = data.y.to(device)
+
         output = model(features, adj)
-        loss_val = F.nll_loss(output[idx_test], labels[idx_test].to(device))
-        acc_val = accuracy(output[idx_test], labels[idx_test].to(device))
-        return loss_val.item(), acc_val.item()
+        acc_test = accuracy(output[data.test_mask],
+                             labels[data.test_mask].to(device))
+        loss_test = F.nll_loss(output[data.test_mask],
+                                labels[data.test_mask].to(device))
+
+        return loss_test.item(), acc_test.item()
 
 
 def test_best(model, features, adj, labels, idx_test, checkpt_file, device):
@@ -279,6 +286,19 @@ def test_best(model, features, adj, labels, idx_test, checkpt_file, device):
         loss_test = F.nll_loss(output[idx_test], labels[idx_test].to(device))
         acc_test = accuracy(output[idx_test], labels[idx_test].to(device))
         return loss_test.item(), acc_test.item()
+
+
+def load_data(args):
+    if "DGG" not in args.model:
+        args.pre_normalize_adj = False
+
+    root = "/home/as03347/sceneEvolution/data/graph_data/{}".format(args.data)
+    dataset = pygeo_datasets.__dict__['Planetoid'](
+        root=root, name=args.data, split=args.split, transform=T.NormalizeFeatures()
+    )
+    data = dataset[0]
+
+    return data, dataset
 
 
 if __name__ == "__main__":
@@ -310,27 +330,16 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
-    if "DGG" not in args.model:
-        args.pre_normalize_adj = False
-    else:
-        args.pre_normalize_adj = False
-    adj, features, labels, idx_train, idx_val, idx_test = load_citation(
-        args.data,
-        args.root,
-        normalize_adj=args.pre_normalize_adj,
-        noise=args.edge_noise_level,
-    )
+    data, dataset = load_data(args)
     cudaid = "cuda"
     device = torch.device(cudaid)
-    features = features.to(device)
-    adj = adj.to(device)
 
     # Load model
     model = models.__dict__[args.model](
-        nfeat=features.shape[1],
+        nfeat=dataset.num_features,
         nlayers=args.layer,
         nhidden=args.hidden,
-        nclass=int(labels.max()) + 1,
+        nclass=dataset.num_classes,
         dropout=args.dropout,
         lamda=args.lamda,
         alpha=args.alpha,
@@ -369,16 +378,13 @@ if __name__ == "__main__":
             args,
             model,
             optimizer,
-            features,
-            adj,
-            labels,
-            idx_train,
+            data,
             device,
             epoch,
             writer,
         )
-        loss_val, acc_val = validate(model, features, adj, labels, idx_val, device)
-        acc_test = test(model, features, adj, labels, idx_test, device)[1]
+        loss_val, acc_val = validate(model, data, device)
+        loss_test, acc_test = test(model, data, device)
 
         if (epoch + 1) % 1 == 0:
             print(
@@ -386,9 +392,9 @@ if __name__ == "__main__":
                 "train",
                 "loss:{:.3f}".format(loss_tra),
                 "acc:{:.2f}".format(acc_tra * 100),
-                "| val",
-                "loss:{:.3f}".format(loss_val),
-                "acc:{:.2f}".format(acc_val * 100),
+                "| test",
+                "loss:{:.3f}".format(loss_test),
+                "acc:{:.2f}".format(acc_test * 100),
             )
 
             writer.add_scalar("train/loss", loss_tra, epoch)
@@ -411,8 +417,8 @@ if __name__ == "__main__":
         if bad_counter == args.patience:
             break
 
-    if args.test:
-        acc = test_best(model, features, adj, labels, idx_test, checkpt_file, device)[1]
+    # if args.test:
+    #     acc = test_best(model, features, adj, labels, idx_test, checkpt_file, device)[1]
 
     print("Train cost: {:.4f}s".format(time.time() - t_total))
     print("Load {}th epoch".format(best_epoch))

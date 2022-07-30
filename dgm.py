@@ -1165,6 +1165,7 @@ class DGG_LearnableK_debug(nn.Module):
             A_hat: renormalized adjaceny [N, N]
 
         """
+
         row_sum = A_hat.sum(-1)
         row_sum = (row_sum) ** -0.5
         D = torch.diag(row_sum)
@@ -1198,6 +1199,7 @@ class DGG_LearnableK_debug(nn.Module):
         ### this module should determine the likelihood of
         ### current edged present in the graph; input features which shouldnt
         ### be connected (i.e. irrelevant edge) should have low likelihoods
+
         # if epoch % 1 == 0:
         #     print('e_i mu: {:.4f} std: {:.4f}'.format(
         #         edge_p.sum(-1).mean().item(), edge_p.sum(-1).std().item())
@@ -1218,10 +1220,10 @@ class DGG_LearnableK_debug(nn.Module):
             log_p, noise_sample=gumbel_noise, noise=noise
         )
         pert_edge_p = torch.exp(pert_log_p)  # [1, N, N]
+
         # print('pert edge p deg {:.5f} {:.5f}'.format(
         #     pert_edge_p.sum(-1).mean().item(),
         #     pert_edge_p.sum(-1).std().item()))
-
         # return pert_edge_p   # STEP 1
 
         # get smooth top-k
@@ -1274,10 +1276,13 @@ class DGG_LearnableK_debug(nn.Module):
         #     actual_k.retain_grad()
         #     topk_edge_p.retain_grad()
 
+        # get difference between in_adj and out_adj
+        topk_edge_p = self.get_adj_diff_stats(in_adj, k, topk_edge_p, writer, epoch)
+
         if not self.hard:
             # return adjacency matrix with softmax probabilities
             # return topk_edge_p.squeeze(0).to_sparse(), debug_dict
-            return topk_edge_p.squeeze(0).to_sparse()
+            return topk_edge_p.to_sparse()
 
         # if hard adj desired, threshold first_k and scatter
         adj_hard = torch.ones_like(adj)
@@ -1288,6 +1293,33 @@ class DGG_LearnableK_debug(nn.Module):
         assert torch.any(torch.isinf(adj_hard)) == False
 
         return adj_hard, k
+
+    def get_adj_diff_stats(self, in_adj, k, topk_edge_p, writer=None, epoch=None):
+        topk_edge_p = topk_edge_p.squeeze(0)
+        in_adj = in_adj.to_dense()
+        on_edge_mask = (in_adj > 0).float()
+        off_edge_mask = (in_adj == 0).float()
+        on_edge_diff = (in_adj - topk_edge_p) * on_edge_mask
+        off_edge_diff = (in_adj - topk_edge_p) * off_edge_mask
+        on_edge_diff_mean = on_edge_diff[on_edge_diff != 0].mean()
+        on_edge_diff_std = on_edge_diff[on_edge_diff != 0].std()
+        off_edge_diff_mean = off_edge_diff[off_edge_diff != 0].mean()
+        off_edge_diff_std = off_edge_diff[off_edge_diff != 0].std()
+        k_diff = k.flatten() - in_adj.sum(-1)
+        k_diff_mean = k_diff.mean()
+        k_diff_std = k_diff.std()
+
+        if self.training:
+            if writer is not None:
+                writer.add_scalar("train_stats/on_edge_mean", on_edge_diff_mean, epoch)
+                writer.add_scalar("train_stats/on_edge_std", on_edge_diff_std, epoch)
+                writer.add_scalar("train_stats/off_edge_mean", off_edge_diff_mean, epoch)
+                writer.add_scalar("train_stats/off_edge_std", off_edge_diff_std, epoch)
+                writer.add_scalar("train_stats/k_diff_mean", k_diff_mean, epoch)
+                writer.add_scalar("train_stats/k_mean", k.flatten().mean(), epoch)
+                writer.add_scalar("train_stats/in_deg_mean", in_adj.sum(-1).mean(), epoch)
+
+        return topk_edge_p
 
     def select_top_k(
         self, N, k, pert_edge_p, mode="k_times_edge_prob", writer=None, epoch=None
@@ -1543,7 +1575,6 @@ class DGG_LearnableK_debug(nn.Module):
 
         """
         if mode == "u-v-dist":
-            # print('input x mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))
             # embed node features to lower dimension
             x = self.node_encode_for_edges(x)  # [1, N, dim]
             # print('embed x mu: {:.5f} std: {:.5f}'.format(x.mean().item(), x.std().item()))

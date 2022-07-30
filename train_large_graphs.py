@@ -29,11 +29,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--root",
     type=str,
-    default="/vol/research/sceneEvolution/models/GCNII",
+    default="/home/as03347/sceneEvolution/models/gcnii",
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="180722_yelp_gcn_noise0", help="experiment name"
+    "--expname", type=str, default="220726_gcniidgg_flickr_noise0", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -52,7 +52,7 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="Yelp", help="dateset")
+parser.add_argument("--data", default="Flickr", help="dateset")
 parser.add_argument("--dataloader", default="GraphSAINTRandomWalkSampler",
                     help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
@@ -66,11 +66,11 @@ parser.add_argument(
     "--use_normalization", type=str2bool, default=False,
     help="use normalization constants from graphsaint"
 )
-parser.add_argument("--model", type=str, default="GCN", help="model name")
+parser.add_argument("--model", type=str, default="GCNII_DGG", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.001,
+    default=0.00,
     help="percentage of noisy edges to add",
 )
 # Differentiable graph generator specific
@@ -246,47 +246,6 @@ def validate(args, model, loader, device, epoch, writer):
 
     total_test_acc = total_examples = 0
     for data in loader:
-        loss_tra += loss_train.item()
-    loss_tra /= 20
-    acc_tra /= 20
-    return loss_tra, acc_tra
-
-
-def train(args, model, optimizer, loader, device, epoch, writer):
-    model.train()
-
-    total_loss = total_examples = total_acc = 0
-    for data in loader:
-        # parse data
-        data = data.to(device)
-        batch_adj = to_scipy_sparse_matrix(
-            edge_index=data.edge_index, num_nodes=data.num_nodes
-        )
-        if args.edge_noise_level > 0.0:
-            batch_adj = add_noisy_edges(batch_adj, noise_level=args.edge_noise_level)
-
-        batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
-        batch_feature = data.x.to(device)
-        batch_label = data.y.to(device)
-
-        out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
-        correct = pred.eq(batch_label)
-
-        total_test_acc += correct[data['val_mask']].sum().item() \
-                          / data['val_mask'].sum().item() * data.num_nodes
-        total_examples += data.num_nodes
-
-    test_acc = total_test_acc / total_examples
-    return None, test_acc
-
-
-@torch.no_grad()
-def validate(args, model, loader, device, epoch, writer):
-    model.eval()
-
-    total_test_acc = total_examples = 0
-    for data in loader:
         data = data.to(device)
         batch_adj = to_scipy_sparse_matrix(
             edge_index=data.edge_index, num_nodes=data.num_nodes
@@ -371,7 +330,7 @@ def load_data():
     if "DGG" not in args.model:
         args.pre_normalize_adj = False
 
-    root = "/vol/research/sceneEvolution/data/graph_data/{}".format(args.data)
+    root = "/home/as03347/sceneEvolution/data/graph_data/{}".format(args.data)
     if 'pubmed' in args.data:
         dataset = pygeo_datasets.__dict__['Planetoid'](
             root=root, name='PubMed', split='public'
@@ -385,18 +344,18 @@ def load_data():
         row, col = data.edge_index
         data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
 
-        loader = GraphSAINTRandomWalkSampler(
+        loader = dataloaders.GraphSAINTRandomWalkSampler(
             data, batch_size=args.graphsaint_bs, walk_length=args.graphsaint_wl,
             num_steps=5, sample_coverage=100,
             save_dir=dataset.processed_dir,
             num_workers=4
         )
     elif 'Cluster' in args.dataloader:
-        cluster_data = ClusterData(data, num_parts=4, recursive=False,
+        cluster_data = dataloaders.ClusterData(data, num_parts=4, recursive=False,
                                    save_dir=dataset.processed_dir)
-        train_loader = ClusterLoader(cluster_data, batch_size=20, shuffle=True,
+        train_loader = dataloaders.ClusterLoader(cluster_data, batch_size=20, shuffle=True,
                                      num_workers=4)
-    return loader
+    return dataset, loader
 
 
 if __name__ == "__main__":
@@ -428,7 +387,7 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
-    loader = load_data()
+    dataset, loader = load_data()
     cudaid = "cuda"
     device = torch.device(cudaid)
 

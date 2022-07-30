@@ -29,11 +29,11 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--root",
     type=str,
-    default="/vol/research/sceneEvolution/models/GCNII",
+    default="/home/as03347/sceneEvolution/models/gcnii",
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="210722_yelp_gcn_noise0", help="experiment name"
+    "--expname", type=str, default="220726_yelp_gcn_noise0", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -68,7 +68,7 @@ parser.add_argument("--model", type=str, default="GCN_MultiClass", help="model n
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.001,
+    default=0.000,
     help="percentage of noisy edges to add",
 )
 # Differentiable graph generator specific
@@ -220,7 +220,7 @@ def train(args, model, optimizer, loader, device, epoch, writer):
         # forward pass
         output = model(batch_feature, batch_adj, epoch, writer)
         loss = F.binary_cross_entropy(
-            output[data.train_mask], batch_label[data.train_mask]
+            output[data.train_mask], batch_label[data.train_mask].float()
         )
         acc_train = evaluate(
             output[data.train_mask], batch_label[data.train_mask]
@@ -351,7 +351,7 @@ if __name__ == "__main__":
     if "DGG" not in args.model:
         args.pre_normalize_adj = False
 
-    root = "/vol/research/sceneEvolution/data/graph_data/{}".format(args.data)
+    root = "/home/as03347/sceneEvolution/data/graph_data/{}".format(args.data)
     dataset = pygeo_datasets.__dict__[args.data](root)
     data = dataset[0]
     row, col = data.edge_index
@@ -360,7 +360,7 @@ if __name__ == "__main__":
         data, batch_size=args.graphsaint_bs, walk_length=args.graphsaint_wl,
         num_steps=5, sample_coverage=100,
         save_dir=dataset.processed_dir,
-        num_workers=4
+        num_workers=0
     )
     cudaid = "cuda"
     device = torch.device(cudaid)
