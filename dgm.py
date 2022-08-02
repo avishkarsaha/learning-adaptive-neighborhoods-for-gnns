@@ -1210,16 +1210,25 @@ class DGG_LearnableK_debug(nn.Module):
         #     edge_p.sum(-1).std().item()))
 
         edge_p = edge_p.unsqueeze(0)  # [1, N, N]
-        # return edge_p  # STEP 0
+
+        # get difference between in_adj and out_adj
+        edge_p = self.get_adj_diff_stats(
+            in_adj, edge_p, k=None, writer=writer, epoch=epoch
+        )
+
+        return self.return_hard_or_soft(
+            in_adj, edge_p, idxs=None, k=None, threshold=0.5
+        )  # STEP 0
 
         # add gumbel noise to edge log probabilities
-        edge_p = edge_p + 1e-8
-        log_p = torch.log(edge_p)  # [1, N, N]
-        gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
-        pert_log_p = self.perturb_edge_prob(
-            log_p, noise_sample=gumbel_noise, noise=noise
-        )
-        pert_edge_p = torch.exp(pert_log_p)  # [1, N, N]
+        # edge_p = edge_p + 1e-8
+        # log_p = torch.log(edge_p)  # [1, N, N]
+        # gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
+        # pert_log_p = self.perturb_edge_prob(
+        #     log_p, noise_sample=gumbel_noise, noise=noise
+        # )
+        # pert_edge_p = torch.exp(pert_log_p)  # [1, N, N]
+        pert_edge_p = edge_p
 
         # print('pert edge p deg {:.5f} {:.5f}'.format(
         #     pert_edge_p.sum(-1).mean().item(),
@@ -1227,14 +1236,18 @@ class DGG_LearnableK_debug(nn.Module):
         # return pert_edge_p   # STEP 1
 
         # get smooth top-k
-        k, log_k = self.k_estimate_net(
-            N, in_adj, x, pert_edge_p, mode=self.k_net_mode
-        )  # [1, N, 1]
+        # k, log_k = self.k_estimate_net(
+        #     N, in_adj, x, pert_edge_p, mode=self.k_net_mode
+        # )  # [1, N, 1]
         ### maybe k should be esitmated by summing the edge probabilities for each node
         ### you dont want to gcn-deg because it passes irrelevant information to the node
         ### (from the irrelevant edges)
         ### you dont want to just use node feature x as it has no sense of whats around it
         ### getting the optimal k is about knowing which are the best neighbouring nodes
+
+        # use pre-computed/fixed k
+        # k = in_adj.to_dense().sum(-1).unsqueeze(0).unsqueeze(-1) # [1, N, 1]
+        # k = torch.maximum(torch.ones_like(k), k - 1)
 
         # select top_k
         topk_edge_p, top_k, actual_k = self.select_top_k(
@@ -1276,27 +1289,39 @@ class DGG_LearnableK_debug(nn.Module):
         #     actual_k.retain_grad()
         #     topk_edge_p.retain_grad()
 
-        # get difference between in_adj and out_adj
-        topk_edge_p = self.get_adj_diff_stats(in_adj, k, topk_edge_p, writer, epoch)
+        self.get_adj_diff_stats(
+            in_adj, topk_edge_p, k, writer=writer, epoch=epoch
+        )
 
+        return self.return_hard_or_soft(in_adj, topk_edge_p, idxs=None, k=k, threshold=0.8)
+
+    def return_hard_or_soft(self, in_adj, edge_p, idxs=None, k=None, threshold=0.8):
+
+        # return soft
         if not self.hard:
-            # return adjacency matrix with softmax probabilities
-            # return topk_edge_p.squeeze(0).to_sparse(), debug_dict
-            return topk_edge_p.to_sparse()
+            return edge_p.squeeze(0).to_sparse()
 
         # if hard adj desired, threshold first_k and scatter
-        adj_hard = torch.ones_like(adj)
-        adj_hard.scatter_(dim=-1, index=idxs, src=(top_k > 0.8).float())
-        adj_hard = (adj_hard - adj).detach() + adj
+        adj_hard = torch.ones_like(edge_p)
+
+        if idxs is not None:
+            adj_hard.scatter_(dim=-1, index=idxs, src=(edge_p > threshold).float())
+
+        adj_hard = (adj_hard - edge_p).detach() + edge_p
 
         assert torch.any(torch.isnan(adj_hard)) == False
         assert torch.any(torch.isinf(adj_hard)) == False
 
-        return adj_hard, k
+        return adj_hard.to_sparse()
 
-    def get_adj_diff_stats(self, in_adj, k, topk_edge_p, writer=None, epoch=None):
+    def get_adj_diff_stats(
+            self, in_adj, topk_edge_p=None, k=None, writer=None, epoch=None
+    ):
         topk_edge_p = topk_edge_p.squeeze(0)
         in_adj = in_adj.to_dense()
+
+        assert topk_edge_p.shape == in_adj.shape
+
         on_edge_mask = (in_adj > 0).float()
         off_edge_mask = (in_adj == 0).float()
         on_edge_diff = (in_adj - topk_edge_p) * on_edge_mask
@@ -1305,9 +1330,11 @@ class DGG_LearnableK_debug(nn.Module):
         on_edge_diff_std = on_edge_diff[on_edge_diff != 0].std()
         off_edge_diff_mean = off_edge_diff[off_edge_diff != 0].mean()
         off_edge_diff_std = off_edge_diff[off_edge_diff != 0].std()
-        k_diff = k.flatten() - in_adj.sum(-1)
-        k_diff_mean = k_diff.mean()
-        k_diff_std = k_diff.std()
+
+        if k is not None:
+            k_diff = k.flatten() - in_adj.sum(-1)
+            k_diff_mean = k_diff.mean()
+            k_diff_std = k_diff.std()
 
         if self.training:
             if writer is not None:
@@ -1315,9 +1342,13 @@ class DGG_LearnableK_debug(nn.Module):
                 writer.add_scalar("train_stats/on_edge_std", on_edge_diff_std, epoch)
                 writer.add_scalar("train_stats/off_edge_mean", off_edge_diff_mean, epoch)
                 writer.add_scalar("train_stats/off_edge_std", off_edge_diff_std, epoch)
-                writer.add_scalar("train_stats/k_diff_mean", k_diff_mean, epoch)
-                writer.add_scalar("train_stats/k_mean", k.flatten().mean(), epoch)
-                writer.add_scalar("train_stats/in_deg_mean", in_adj.sum(-1).mean(), epoch)
+                writer.add_scalar("train_stats/in_deg_mean", in_adj.sum(-1).mean(),
+                                  epoch)
+                if k is not None:
+                    writer.add_scalar("train_stats/k_diff_mean", k_diff_mean, epoch)
+                    writer.add_scalar("train_stats/k_mean", k.flatten().mean(), epoch)
+
+
 
         return topk_edge_p
 
@@ -1630,6 +1661,38 @@ class DGG_LearnableK_debug(nn.Module):
             edge_feat = torch.concat(
                 [u, v, u_deg, v_deg], dim=-1
             )  # [1, n, dim + dim + 2]
+
+            # edge probabilities
+            z = self.edge_encode(edge_feat).flatten()  # [n]
+            z = torch.sigmoid(z)
+
+            # convert into to sparse and then into dense
+            z = torch.sparse.FloatTensor(in_adj.indices(), z, in_adj.shape)
+            return z.to_dense()
+        elif mode == "u-v-deg-dist":
+            # embed node features to lower dimension
+            x = self.node_encode_for_edges(x)  # [1, N, dim]
+
+            # get edge end features
+            u = x[:, in_adj.indices()[0, :]]  # [1, n, dim]
+            v = x[:, in_adj.indices()[1, :]]  # [1, n, dim]
+
+            # get degree
+            deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
+            mu = deg.mean()
+            var = deg.std()
+            norm_deg = (deg - mu) / (var + 1e-5)
+            u_deg = deg[:, in_adj.indices()[0, :]]
+            v_deg = deg[:, in_adj.indices()[1, :]]
+
+            # distance
+            t = -1.0  # this t parameter makes a significant difference
+            dist = torch.linalg.vector_norm(u - v, dim=-1, ord=2)   # [1, N]
+            edge_prob = torch.exp(t * dist).unsqueeze(-1)   # [1, N, 1]
+
+            edge_feat = torch.concat(
+                [u, v, u_deg, v_deg, edge_prob], dim=-1
+            )  # [1, n, dim + dim + 3]
 
             # edge probabilities
             z = self.edge_encode(edge_feat).flatten()  # [n]

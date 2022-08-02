@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220730_cora_gcndgg_debug",
+    default="220801_cora_gcndgg_onlyOnLayer1",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -128,7 +128,7 @@ parser.add_argument(
 parser.add_argument(
     "--n_dgg_layers",
     type=int,
-    default=1,
+    default=2,
     help="number of dgg layers",
 )
 parser.add_argument(
@@ -148,8 +148,8 @@ parser.add_argument(
 parser.add_argument(
     "--dgg_mode_edge_net",
     type=str,
-    default="u-v-dist",
-    choices=["u-v-dist", "u-v-A_uv", "u-v-deg", "edge_conv", "A_uv"],
+    default="u-v-deg",
+    choices=["u-v-dist", "u-v-A_uv", "u-v-deg", "edge_conv", "A_uv", "u-v-deg-dist"],
     help="mode for the edge_prob_net in DGG, determines which features are used"
     "in the forward pass",
 )
@@ -164,7 +164,7 @@ parser.add_argument(
 parser.add_argument(
     "--dgg_mode_k_select",
     type=str,
-    default="k_only",
+    default="k_times_edge_prob",
     choices=["edge_p-cdf", "k_only", "k_times_edge_prob"],
     help="mode for the k_selector in DGG, determines which features are used"
     "in the forward pass",
@@ -297,6 +297,17 @@ def load_data(args):
         root=root, name=args.data, split=args.split, transform=T.NormalizeFeatures()
     )
     data = dataset[0]
+
+    # transform = T.GDC(
+    #     self_loop_weight=1,
+    #     normalization_in='sym',
+    #     normalization_out='col',
+    #     diffusion_kwargs=dict(method='ppr', alpha=0.05),
+    #     sparsification_kwargs=dict(method='topk', k=128, dim=0),
+    #     exact=True,
+    # )
+    #
+    # data = transform(data)
 
     return data, dataset
 
