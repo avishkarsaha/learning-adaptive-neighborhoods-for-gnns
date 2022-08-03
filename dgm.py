@@ -1151,6 +1151,8 @@ class DGG_LearnableK_debug(nn.Module):
 
         self.var_grads = {"edge_p": [], "first_k": [], "out_adj": []}
 
+        self.args = args
+
     def hook(self, grad):
         # grad = torch.clamp(grad, min=-0.05, max=0.05)
         return grad
@@ -1223,18 +1225,30 @@ class DGG_LearnableK_debug(nn.Module):
             # add gumbel noise to edge log probabilities
             edge_p = edge_p + 1e-8
             log_p = torch.log(edge_p)  # [1, N, N]
-            gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
-            pert_log_p = gumbel_sample(log_p, gumbel_noise)
+
+            if self.args.symmetric_noise:
+                # add a symmetric gumbel noise matrix
+                G = torch.zeros_like(edge_p).squeeze(0) # [N, N]
+                i, j = torch.triu_indices(G.shape[0], G.shape[1], 1)
+                gumbel_noise = self.gumbel.sample([len(i)]).cuda()
+                G[i, j] = gumbel_noise
+                G.T[i, j] = gumbel_noise
+                G = G.unsqueeze(0)      # [1, N, N]
+            else:
+                # asymmetric gumbel noise matrix
+                G = self.gumbel.sample(log_p.shape).cuda()
+
+            pert_log_p = gumbel_sample(log_p, G)
             pert_edge_p = torch.exp(pert_log_p)  # [1, N, N]
         else:
             pert_edge_p = edge_p
 
-        pert_edge_p = self.get_adj_diff_stats(
-            in_adj, pert_edge_p, k=None, writer=writer, epoch=epoch
-        )
-        return self.return_hard_or_soft(
-            in_adj, pert_edge_p, idxs=None, k=None, threshold=0.5
-        )   # STEP 1
+        # pert_edge_p = self.get_adj_diff_stats(
+        #     in_adj, pert_edge_p, k=None, writer=writer, epoch=epoch
+        # )
+        # return self.return_hard_or_soft(
+        #     in_adj, pert_edge_p, idxs=None, k=None, threshold=0.5
+        # )   # STEP 1
 
         # get smooth top-k
         k, log_k = self.k_estimate_net(

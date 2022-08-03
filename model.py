@@ -794,7 +794,7 @@ class GCN_DGG(torch.nn.Module):
     def dgg_net(self, x, i, unnorm_adj, writer, epoch):
         # learn adjacency (sparse tensor)
         adj = self.dggs[i](
-            x=x, in_adj=unnorm_adj, noise=True, writer=writer, epoch=epoch
+            x=x, in_adj=unnorm_adj, noise=False, writer=writer, epoch=epoch
         )
         return adj
 

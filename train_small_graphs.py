@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220802_cora_gcndgg_cdc_step1_gumbNoise0.3-tvt",
+    default="220802_cora_gcndgg_cdc_step2_stoK-input-deg_k-times-edge-prob",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -130,6 +130,12 @@ parser.add_argument(
     type=int,
     default=1,
     help="number of dgg layers",
+)
+parser.add_argument(
+    "--symmetric_noise",
+    type=str2bool,
+    default=True,
+    help="whether to add gumbel noise to edges as a symmetric matrix",
 )
 parser.add_argument(
     "--pre_normalize_adj",
