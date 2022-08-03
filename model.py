@@ -717,7 +717,7 @@ class GCN_DGG(torch.nn.Module):
         A_hat = torch.mm(torch.mm(D, A_hat), D)
         return A_hat
 
-    def forward(self, x, in_adj, epoch=None, writer=None):
+    def forward(self, x, in_adj, noise=True, epoch=None, writer=None):
         """
         Args:
             x: node features
@@ -751,10 +751,14 @@ class GCN_DGG(torch.nn.Module):
             if i < len(self.dggs):
                 if self.dgg_adj_input == "input_adj":
                     # always use input adjacency
-                    unnorm_adj = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
+                    unnorm_adj = self.dgg_net(
+                        x, i, in_adj.coalesce(), writer, epoch
+                    )
                 else:
                     # use updated adjacency
-                    unnorm_adj = self.dgg_net(x, i, unnorm_adj, writer, epoch)
+                    unnorm_adj = self.dgg_net(
+                        x, i, unnorm_adj, writer, epoch
+                    )
                 norm_adj = self.normalize_adj(unnorm_adj.to_dense())
 
             diagonal_w = norm_adj[
@@ -790,7 +794,7 @@ class GCN_DGG(torch.nn.Module):
     def dgg_net(self, x, i, unnorm_adj, writer, epoch):
         # learn adjacency (sparse tensor)
         adj = self.dggs[i](
-            x=x, in_adj=unnorm_adj, noise=self.training, writer=writer, epoch=epoch
+            x=x, in_adj=unnorm_adj, noise=True, writer=writer, epoch=epoch
         )
         return adj
 

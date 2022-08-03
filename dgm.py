@@ -1212,33 +1212,34 @@ class DGG_LearnableK_debug(nn.Module):
         edge_p = edge_p.unsqueeze(0)  # [1, N, N]
 
         # get difference between in_adj and out_adj
-        edge_p = self.get_adj_diff_stats(
-            in_adj, edge_p, k=None, writer=writer, epoch=epoch
-        )
-
-        return self.return_hard_or_soft(
-            in_adj, edge_p, idxs=None, k=None, threshold=0.5
-        )  # STEP 0
-
-        # add gumbel noise to edge log probabilities
-        # edge_p = edge_p + 1e-8
-        # log_p = torch.log(edge_p)  # [1, N, N]
-        # gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
-        # pert_log_p = self.perturb_edge_prob(
-        #     log_p, noise_sample=gumbel_noise, noise=noise
+        # edge_p = self.get_adj_diff_stats(
+        #     in_adj, edge_p, k=None, writer=writer, epoch=epoch
         # )
-        # pert_edge_p = torch.exp(pert_log_p)  # [1, N, N]
-        pert_edge_p = edge_p
+        # return self.return_hard_or_soft(
+        #     in_adj, edge_p, idxs=None, k=None, threshold=0.5
+        # )  # STEP 0
 
-        # print('pert edge p deg {:.5f} {:.5f}'.format(
-        #     pert_edge_p.sum(-1).mean().item(),
-        #     pert_edge_p.sum(-1).std().item()))
-        # return pert_edge_p   # STEP 1
+        if noise == True:
+            # add gumbel noise to edge log probabilities
+            edge_p = edge_p + 1e-8
+            log_p = torch.log(edge_p)  # [1, N, N]
+            gumbel_noise = self.gumbel.sample(log_p.shape).cuda()
+            pert_log_p = gumbel_sample(log_p, gumbel_noise)
+            pert_edge_p = torch.exp(pert_log_p)  # [1, N, N]
+        else:
+            pert_edge_p = edge_p
+
+        pert_edge_p = self.get_adj_diff_stats(
+            in_adj, pert_edge_p, k=None, writer=writer, epoch=epoch
+        )
+        return self.return_hard_or_soft(
+            in_adj, pert_edge_p, idxs=None, k=None, threshold=0.5
+        )   # STEP 1
 
         # get smooth top-k
-        # k, log_k = self.k_estimate_net(
-        #     N, in_adj, x, pert_edge_p, mode=self.k_net_mode
-        # )  # [1, N, 1]
+        k, log_k = self.k_estimate_net(
+            N, in_adj, x, pert_edge_p, mode=self.k_net_mode
+        )  # [1, N, 1]
         ### maybe k should be esitmated by summing the edge probabilities for each node
         ### you dont want to gcn-deg because it passes irrelevant information to the node
         ### (from the irrelevant edges)

@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220801_cora_gcndgg_onlyOnLayer1",
+    default="220802_cora_gcndgg_cdc_step1_gumbNoise0.3-tvt",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -128,7 +128,7 @@ parser.add_argument(
 parser.add_argument(
     "--n_dgg_layers",
     type=int,
-    default=2,
+    default=1,
     help="number of dgg layers",
 )
 parser.add_argument(
@@ -225,7 +225,7 @@ def train_debug(
     labels = data.y.to(device)
 
     optimizer.zero_grad()
-    output = model(features, adj, epoch, writer)
+    output = model(features, adj, epoch=epoch, writer=writer)
     acc_train = accuracy(output[data.train_mask], labels[data.train_mask].to(device))
     loss_train = F.nll_loss(output[data.train_mask], labels[data.train_mask].to(device))
     loss_train.backward()
@@ -413,6 +413,7 @@ if __name__ == "__main__":
             writer.add_scalar("val/loss", loss_val, epoch)
             writer.add_scalar("val/acc", acc_val, epoch)
             writer.add_scalar("test/acc", acc_test, epoch)
+            writer.add_scalar("test/loss", loss_test, epoch)
 
         if loss_val < best:
             best = loss_val
