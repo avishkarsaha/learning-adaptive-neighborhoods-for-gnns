@@ -8,6 +8,8 @@ import sys
 import pickle as pkl
 import networkx as nx
 import json
+
+from networkx.algorithms import community as nx_comm
 from networkx.readwrite import json_graph
 import pdb
 import torch.nn as nn
@@ -15,8 +17,11 @@ from torch_geometric.datasets import AttributedGraphDataset
 import torch_geometric.datasets as pygeo_datasets
 import torch_geometric.loader as pygeo_loaders
 from torch_geometric.data import Data
-from torch_geometric.utils import degree
+from torch_geometric.utils import degree, to_networkx
 from torch_geometric.utils import to_scipy_sparse_matrix
+
+# from train_small_graphs import args
+
 sys.setrecursionlimit(99999)
 
 
@@ -1238,3 +1243,78 @@ if __name__ == "__main__":
     # load_data_transductive('Reddit', 'GraphSAINTRandomWalkSampler', root)
     # load_graphsaint_example()
     load_clustergcn_reddit('/home/as03347/sceneEvolution/data/graph_data/reddit')
+
+
+def remove_interclass_edges(adj, labels):
+    """remove interclass edges using ground truth labels"""
+    adj = adj.coalesce()
+    u_idx = adj.indices()[0]
+    v_idx = adj.indices()[1]
+    u_label = labels[u_idx]
+    v_label = labels[v_idx]
+
+    ic_edge_mask = u_label != v_label  # inter-class edge mask
+    ic_idxs = adj.indices()[:, ic_edge_mask]
+    non_ic_edge_mask = ~ic_edge_mask  # intra-class edge mask
+    non_ic_idxs = adj.indices()[:, non_ic_edge_mask]
+
+    values = torch.ones_like(non_ic_idxs[0])
+    shape = adj.shape
+    adj = torch.sparse.FloatTensor(non_ic_idxs, values, shape)
+    return adj
+
+
+def calc_learned_edges_stats(out_adj, in_adj, labels):
+    """
+    calculate the number of interclass and intraclass edges in
+    the learned adjacency matrix
+    """
+    in_adj = in_adj.coalesce()
+    out_adj = out_adj.coalesce().to_dense()
+
+    u_idx = in_adj.indices()[0]
+    v_idx = in_adj.indices()[1]
+    u_label = labels[u_idx]
+    v_label = labels[v_idx]
+
+    ic_edge_mask = u_label != v_label  # inter-class edge mask
+    ic_idxs = in_adj.indices()[:, ic_edge_mask]
+    non_ic_edge_mask = ~ic_edge_mask  # intra-class edge mask
+    non_ic_idxs = in_adj.indices()[:, non_ic_edge_mask]
+
+    out_adj_on_edge = out_adj[u_idx, v_idx]
+
+    # calculate ratios
+    ic_ratio = out_adj_on_edge[ic_edge_mask].sum() / ic_edge_mask.sum()
+    non_ic_ratio = out_adj_on_edge[non_ic_edge_mask].sum() / non_ic_edge_mask.sum()
+    ic_ratio_t = (out_adj_on_edge[ic_edge_mask] > 0.5).float().sum() / ic_edge_mask.sum()
+    non_ic_ratio_t = (out_adj_on_edge[non_ic_edge_mask] > 0.5).float().sum() / non_ic_edge_mask.sum()
+
+    print('ic ratios {:.3f} {:.3f}'.format(
+        float(ic_ratio), float(ic_ratio_t))
+    )
+    print('non ic ratios {:.3f} {:.3f}'.format(
+        float(non_ic_ratio), float(non_ic_ratio_t))
+    )
+
+
+def remove_intercommunity_edges(data, adj):
+    """
+    perform community detection and then remove edges between communities
+    """
+
+    # convert torch_geometric data instance to networkx.Graph
+    G_nx = to_networkx(data)
+
+    c = nx_comm.greedy_modularity_communities(
+        G_nx, cutoff=args.data_nclasses, best_n=args.data_nclasses, resolution=5
+    )
+
+    # remove edges between communities
+    adj = adj.coalesce()
+    u_idx = adj.indices()[0]
+    v_idx = adj.indices()[1]
+    u_label = labels[u_idx]
+    v_label = labels[v_idx]
+
+    print(len(c))

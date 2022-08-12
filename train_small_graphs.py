@@ -1,14 +1,12 @@
 from __future__ import division
 from __future__ import print_function
 
-import os
 import time
 import random
 import argparse
-import numpy as np
-import torch
-import torch.nn.functional as F
 import torch.optim as optim
+
+import utils
 from utils import *
 import model as models
 import uuid
@@ -17,6 +15,8 @@ import torch_geometric.transforms as T
 import shutil
 
 # Training settings
+from utils import remove_interclass_edges, calc_learned_edges_stats
+
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--root",
@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220802_cora_gcndgg_cdc_step2_stoK-input-deg_k-times-edge-prob",
+    default="220808_cora_gcndgg_debug",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -56,6 +56,12 @@ parser.add_argument("--variant", type=str2bool, default=False, help="GCN* model.
 parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
+parser.add_argument(
+    "--data_nclasses",
+    type=int,
+    default=0,
+    help="number of classes, set during runtime",
+)
 parser.add_argument("--model", type=str, default="GCN_DGG", help="model name")
 parser.add_argument(
     "--edge_noise_level",
@@ -63,7 +69,19 @@ parser.add_argument(
     default=0.000,
     help="percentage of noisy edges to add",
 )
+parser.add_argument(
+    "--remove_interclass_edges",
+    type=float,
+    default=0.0,
+    help="What percent of interclass edges to remove",
+)
 # Differentiable graph generator specific
+parser.add_argument(
+    "--debug_step",
+    type=int,
+    default=3,
+    help="which step of DGG to return at, for debugging only",
+)
 parser.add_argument(
     "--dgm_dim",
     type=int,
@@ -128,7 +146,7 @@ parser.add_argument(
 parser.add_argument(
     "--n_dgg_layers",
     type=int,
-    default=1,
+    default=2,
     help="number of dgg layers",
 )
 parser.add_argument(
@@ -136,6 +154,18 @@ parser.add_argument(
     type=str2bool,
     default=True,
     help="whether to add gumbel noise to edges as a symmetric matrix",
+)
+parser.add_argument(
+    "--perturb_edge_prob",
+    type=str2bool,
+    default=False,
+    help="perturb edge probabilities with gumbel noise",
+)
+parser.add_argument(
+    "--stochastic_k",
+    type=str2bool,
+    default=False,
+    help="keep k estimator deterministic or stochastic (where it is sampled with noise)",
 )
 parser.add_argument(
     "--pre_normalize_adj",
@@ -162,8 +192,8 @@ parser.add_argument(
 parser.add_argument(
     "--dgg_mode_k_net",
     type=str,
-    default="input_deg",
-    choices=["pass", "input_deg", "gcn-x-deg", "x"],
+    default="x",
+    choices=["pass", "learn_normalized_degree", "input_deg", "gcn-x-deg", "x"],
     help="mode for the k_estimate_net in DGG, determines which features are used"
     "in the forward pass",
 )
@@ -230,13 +260,21 @@ def train_debug(
     features = data.x.to(device)
     labels = data.y.to(device)
 
+    if args.remove_interclass_edges > 0:
+        # remove_intercommunity_edges(data, adj)
+        adj = remove_interclass_edges(adj, labels)
+
     optimizer.zero_grad()
-    output = model(features, adj, epoch=epoch, writer=writer)
+
+    output, out_adj = model(features, adj, epoch=epoch, writer=writer)
     acc_train = accuracy(output[data.train_mask], labels[data.train_mask].to(device))
     loss_train = F.nll_loss(output[data.train_mask], labels[data.train_mask].to(device))
     loss_train.backward()
 
     optimizer.step()
+    print('train')
+    calc_learned_edges_stats(out_adj, adj, labels)
+
     return loss_train.item(), acc_train.item()
 
 
@@ -253,12 +291,14 @@ def validate(model, data, device):
         features = data.x.to(device)
         labels = data.y.to(device)
 
-        output = model(features, adj)
+        if args.remove_interclass_edges > 0:
+            adj = remove_interclass_edges(adj, labels)
+
+        output, out_adj = model(features, adj)
         acc_val = accuracy(output[data.val_mask],
                              labels[data.val_mask].to(device))
         loss_val = F.nll_loss(output[data.val_mask],
                                 labels[data.val_mask].to(device))
-
         return loss_val.item(), acc_val.item()
 
 
@@ -275,12 +315,16 @@ def test(model, data, device):
         features = data.x.to(device)
         labels = data.y.to(device)
 
-        output = model(features, adj)
+        if args.remove_interclass_edges > 0:
+            adj = remove_interclass_edges(adj, labels)
+
+        output, out_adj = model(features, adj)
         acc_test = accuracy(output[data.test_mask],
                              labels[data.test_mask].to(device))
         loss_test = F.nll_loss(output[data.test_mask],
                                 labels[data.test_mask].to(device))
-
+        print('test')
+        calc_learned_edges_stats(out_adj, adj, labels)
         return loss_test.item(), acc_test.item()
 
 
@@ -350,7 +394,7 @@ if __name__ == "__main__":
     data, dataset = load_data(args)
     cudaid = "cuda"
     device = torch.device(cudaid)
-
+    args.data_nclasses = dataset.num_classes
     # Load model
     model = models.__dict__[args.model](
         nfeat=dataset.num_features,
@@ -364,7 +408,7 @@ if __name__ == "__main__":
         args=args,
     ).to(device)
 
-    if "GCNII" in args.model:
+    if "GCN" in args.model and "II" in args.model:
         optimizer = optim.Adam(
             [
                 {"params": model.params1, "weight_decay": args.wd1},
@@ -372,7 +416,7 @@ if __name__ == "__main__":
             ],
             lr=args.lr,
         )
-    else:
+    elif 'GCN' in args.model and "II" not in args.model:
         optimizer = optim.Adam(
             [
                 dict(params=model.params1, weight_decay=5e-4),
@@ -380,6 +424,9 @@ if __name__ == "__main__":
             ],
             lr=args.lr,
         )  # Only perform weight-decay on first convolution.
+    elif 'SAGE' in args.model:
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
 
     # Run
     t_total = time.time()

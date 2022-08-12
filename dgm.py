@@ -1108,6 +1108,7 @@ class DGG_LearnableK_debug(nn.Module):
             nn.LeakyReLU(),
             nn.Linear(latent_dim, 1),
         )
+        self.t = nn.Parameter(torch.tensor(-0.1))
         self.edge_conv_phi = nn.Linear(latent_dim, latent_dim // 2)
         self.edge_conv_theta = nn.Linear(latent_dim, latent_dim // 2)
         self.edge_conv_encode = nn.Linear(latent_dim // 2, 1)
@@ -1134,11 +1135,11 @@ class DGG_LearnableK_debug(nn.Module):
         )
         self.k_W = nn.Parameter(torch.rand(latent_dim, latent_dim, requires_grad=True))
 
-        if self.k_net_mode == "input_deg":
-            self.k_net = LearnableKEncoder(in_dim=3, latent_dim=latent_dim // 4)
+        if self.k_net_mode == "input_deg" or self.k_net_mode == "learn_normalized_degree":
+            self.k_net = LearnableKEncoder(in_dim=3, latent_dim=latent_dim // 4, args=args)
         else:
             self.k_net = LearnableKEncoder(
-                in_dim=latent_dim // 2, latent_dim=latent_dim // 4
+                in_dim=latent_dim // 2, latent_dim=latent_dim // 4, args=args
             )
 
         # Top-k selector
@@ -1192,36 +1193,22 @@ class DGG_LearnableK_debug(nn.Module):
         # prepare input featuresfor rest of function
         x = x.unsqueeze(0)  # [1, N, dim]
 
-        # print('n edges total', in_adj.to_dense().sum(), len(in_adj.indices()[0]))
-        # print('in deg {:.5f} {:.5f}'.format(
-        #     in_adj.to_dense().sum(-1).mean().item(), in_adj.to_dense().sum(-1).std().item()))
-
         # embed input and adjacency to get initial edge log probabilities
         edge_p = self.edge_prob_net(in_adj, x, mode=self.edge_prob_net_mode)  # [N, N]
-        ### this module should determine the likelihood of
-        ### current edged present in the graph; input features which shouldnt
-        ### be connected (i.e. irrelevant edge) should have low likelihoods
 
-        # if epoch % 1 == 0:
-        #     print('e_i mu: {:.4f} std: {:.4f}'.format(
-        #         edge_p.sum(-1).mean().item(), edge_p.sum(-1).std().item())
-        #     )
         # perform rest of forward on dense tensors
-        # print('edge p deg {:.5f} {:.5f}'.format(
-        #     edge_p.sum(-1).mean().item(),
-        #     edge_p.sum(-1).std().item()))
-
         edge_p = edge_p.unsqueeze(0)  # [1, N, N]
 
-        # get difference between in_adj and out_adj
-        # edge_p = self.get_adj_diff_stats(
-        #     in_adj, edge_p, k=None, writer=writer, epoch=epoch
-        # )
-        # return self.return_hard_or_soft(
-        #     in_adj, edge_p, idxs=None, k=None, threshold=0.5
-        # )  # STEP 0
+        if self.args.debug_step == 0:
+            # get difference between in_adj and out_adj
+            edge_p = self.get_adj_diff_stats(
+                in_adj, edge_p, k=None, writer=writer, epoch=epoch
+            )
+            return self.return_hard_or_soft(
+                in_adj, edge_p, idxs=None, k=None, threshold=0.5
+            )  # STEP 0
 
-        if noise == True:
+        if self.args.perturb_edge_prob:
             # add gumbel noise to edge log probabilities
             edge_p = edge_p + 1e-8
             log_p = torch.log(edge_p)  # [1, N, N]
@@ -1243,15 +1230,16 @@ class DGG_LearnableK_debug(nn.Module):
         else:
             pert_edge_p = edge_p
 
-        # pert_edge_p = self.get_adj_diff_stats(
-        #     in_adj, pert_edge_p, k=None, writer=writer, epoch=epoch
-        # )
-        # return self.return_hard_or_soft(
-        #     in_adj, pert_edge_p, idxs=None, k=None, threshold=0.5
-        # )   # STEP 1
+        if self.args.debug_step == 1:
+            pert_edge_p = self.get_adj_diff_stats(
+                in_adj, pert_edge_p, k=None, writer=writer, epoch=epoch
+            )
+            return self.return_hard_or_soft(
+                in_adj, pert_edge_p, idxs=None, k=None, threshold=0.5
+            )   # STEP 1
 
         # get smooth top-k
-        k, log_k = self.k_estimate_net(
+        k, _ = self.k_estimate_net(
             N, in_adj, x, pert_edge_p, mode=self.k_net_mode
         )  # [1, N, 1]
         ### maybe k should be esitmated by summing the edge probabilities for each node
@@ -1265,25 +1253,18 @@ class DGG_LearnableK_debug(nn.Module):
         # k = torch.maximum(torch.ones_like(k), k - 1)
 
         # select top_k
-        topk_edge_p, top_k, actual_k = self.select_top_k(
+        topk_edge_p, top_k, idxs = self.select_top_k(
             N, k, pert_edge_p, mode=self.k_select_mode, writer=writer, epoch=epoch
         )  # [1, N, N]
         if writer is not None:
             writer.add_scalar("values/first_k_std", top_k.sum(-1).std(), epoch)
             writer.add_scalar("values/first_k_mean", top_k.sum(-1).mean(), epoch)
-        # if epoch % 1 == 0:
-        #     print('first_k mu: {:.4f} std: {:.4f}'.format(
-        #         top_k.sum(-1).mean().item(), top_k.sum(-1).std().item())
-        #     )
+
         debug_dict = {
             "edge_p": edge_p,  # [1, N, N]
             "first_k": top_k,  # [1, N, N]
             "out_adj": topk_edge_p,  # [1, N, N]
         }
-
-        # print('out deg {:.5f} {:.5f}'.format(
-        #     topk_edge_p.sum(-1).mean().item(),
-        #     topk_edge_p.sum(-1).std().item()))
 
         # register hooks for gradients
         # if self.training:
@@ -1308,7 +1289,7 @@ class DGG_LearnableK_debug(nn.Module):
             in_adj, topk_edge_p, k, writer=writer, epoch=epoch
         )
 
-        return self.return_hard_or_soft(in_adj, topk_edge_p, idxs=None, k=k, threshold=0.8)
+        return self.return_hard_or_soft(in_adj, topk_edge_p, idxs=idxs, k=k, threshold=0.5)
 
     def return_hard_or_soft(self, in_adj, edge_p, idxs=None, k=None, threshold=0.8):
 
@@ -1327,7 +1308,7 @@ class DGG_LearnableK_debug(nn.Module):
         assert torch.any(torch.isnan(adj_hard)) == False
         assert torch.any(torch.isinf(adj_hard)) == False
 
-        return adj_hard.to_sparse()
+        return adj_hard.squeeze(0).to_sparse()
 
     def get_adj_diff_stats(
             self, in_adj, topk_edge_p=None, k=None, writer=None, epoch=None
@@ -1436,7 +1417,7 @@ class DGG_LearnableK_debug(nn.Module):
 
             # Unsort
             adj = first_k_log_p.clone().scatter_(dim=-1, index=idxs, src=first_k_log_p)
-            return adj, first_k, torch.tensor(0)
+            return adj, first_k, idxs
 
         elif mode == "k_only":
             # sort edge probabilities in DESCENDING order
@@ -1452,7 +1433,6 @@ class DGG_LearnableK_debug(nn.Module):
             adj = first_k.clone().scatter_(dim=-1, index=idxs, src=first_k)
             return adj, first_k, torch.tensor(0)
 
-        # k_only with linear gradients (instead of tanh saturating grads)
         elif mode == "k_only_w_linear_grad":
             # sort edge probabilities in DESCENDING order
             s_edge_p, idxs = torch.sort(pert_edge_p, dim=-1, descending=True)
@@ -1506,6 +1486,7 @@ class DGG_LearnableK_debug(nn.Module):
         elif mode == "calculate":
             in_degree = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
             k = (in_degree / N) * 2 - 1
+            return k
 
         elif mode == "learn_normalized_degree":
             in_deg = in_adj.to_dense().sum(-1).reshape(1, -1, 1)  # [1, N, 1]
@@ -1519,6 +1500,8 @@ class DGG_LearnableK_debug(nn.Module):
 
             # return to original domain
             unnorm_deg = (in_deg * var) + mu
+            unnorm_deg = F.relu(unnorm_deg)
+            unnorm_deg = unnorm_deg + 1.0
 
             return unnorm_deg, unnorm_deg
 
@@ -1631,7 +1614,7 @@ class DGG_LearnableK_debug(nn.Module):
             # print('n edges', u.shape[1])
 
             # distance
-            t = -1.0  # this t parameter makes a significant difference
+            t = -0.05  # this t parameter makes a significant difference
             dist = torch.linalg.vector_norm(u - v, dim=-1, ord=2)
             # print('dist edge p {:.5f} {:.5f}'.format(
             #     dist.mean().item(),
@@ -1744,7 +1727,7 @@ class DGG_LearnableK_debug(nn.Module):
 
 
 class LearnableKEncoder(nn.Module):
-    def __init__(self, in_dim, latent_dim, learn_k_bias=False):
+    def __init__(self, in_dim, latent_dim, learn_k_bias=False, args=None):
         super(LearnableKEncoder, self).__init__()
 
         self.learn_k_bias = learn_k_bias
@@ -1753,6 +1736,7 @@ class LearnableKEncoder(nn.Module):
         self.k_mu = nn.Linear(in_dim, latent_dim)
         self.k_logvar = nn.Linear(in_dim, latent_dim)
         self.k_project = nn.Linear(latent_dim, 1)
+        self.args = args
 
     def latent_sample(self, mu, logvar):
         if self.training:
@@ -1765,9 +1749,16 @@ class LearnableKEncoder(nn.Module):
             return mu
 
     def forward(self, x):
-        latent_k_mu = self.k_mu(x)
-        latent_k_logvar = self.k_logvar(x)
-        latent_k = self.latent_sample(latent_k_mu, latent_k_logvar)
+
+        if self.args.stochastic_k:
+            # stochastic k estimation with a latent sample
+            latent_k_mu = self.k_mu(x)
+            latent_k_logvar = self.k_logvar(x)
+            latent_k = self.latent_sample(latent_k_mu, latent_k_logvar)
+        else:
+            # deterministic k estimation
+            latent_k = self.k_mu(x)
+
         k = self.k_project(latent_k)  # [B, N, 1]
         return k
 
