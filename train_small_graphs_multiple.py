@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220816_cora_gcndgg00_debug_hardAtTestTime",
+    default="220816_citeseer_gcndgg00_multiple_models",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -47,7 +47,7 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="cora", help="dateset")
+parser.add_argument("--data", default="citeseer", help="dateset")
 parser.add_argument("--split", default="public", help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
@@ -243,7 +243,7 @@ def train(args, model, optimizer, features, adj, labels, idx_train, device):
     return loss_train.item(), acc_train.item()
 
 
-def train_debug(
+def train_gcn_dgg(
     args, model, optimizer, data, device, epoch, writer
 ):
     model.train()
@@ -260,13 +260,46 @@ def train_debug(
     features = data.x.to(device)
     labels = data.y.to(device)
 
-    if args.remove_interclass_edges > 0:
-        # remove_intercommunity_edges(data, adj)
-        adj = remove_interclass_edges(adj, labels)
-
     optimizer.zero_grad()
 
     gt_adj = remove_interclass_edges(adj, labels)
+
+    output, out_adj, x_dgg = model(features, adj, epoch=epoch, writer=writer)
+    acc_train = accuracy(output[data.train_mask], labels[data.train_mask].to(device))
+    loss_train_1 = F.nll_loss(output[data.train_mask], labels[data.train_mask].to(device))
+    loss_train_2 = F.mse_loss(
+        out_adj.to_dense(), gt_adj.to(device).to_dense().float()
+    )
+    loss_train = loss_train_1 + loss_train_2 * 10000
+    loss_train.backward()
+
+    optimizer.step()
+    # print('train')
+    # calc_learned_edges_stats(out_adj, adj, labels)
+
+    return loss_train.item(), acc_train.item()
+
+
+def train_gcn(
+    args, model, optimizer, data, device, epoch, writer
+):
+    model.train()
+
+    # parse data
+    data = data.to(device)
+    adj = to_scipy_sparse_matrix(
+        edge_index=data.edge_index, num_nodes=data.num_nodes
+    )
+    if args.edge_noise_level > 0.0:
+        adj = add_noisy_edges(adj, noise_level=args.edge_noise_level)
+
+    adj = sparse_mx_to_torch_sparse_tensor(adj).to(device)
+    features = data.x.to(device)
+    labels = data.y.to(device)
+
+    adj = remove_interclass_edges(adj, labels)
+
+    optimizer.zero_grad()
 
     output, out_adj, x_dgg = model(features, adj, epoch=epoch, writer=writer)
     acc_train = accuracy(output[data.train_mask], labels[data.train_mask].to(device))
@@ -304,8 +337,19 @@ def validate(model, data, device):
         return loss_val.item(), acc_val.item()
 
 
-def test(model, data, device):
-    model.eval()
+def test(model_gcn, model_gcn_dgg, data, device):
+    """
+    Test GCN with adjacency generated from GCN_DGG
+    Args:
+        model:
+        data:
+        device:
+
+    Returns:
+
+    """
+    model_gcn.eval()
+    model_gcn_dgg.eval()
     with torch.no_grad():
         adj = to_scipy_sparse_matrix(
             edge_index=data.edge_index, num_nodes=data.num_nodes
@@ -317,17 +361,36 @@ def test(model, data, device):
         features = data.x.to(device)
         labels = data.y.to(device)
 
-        if args.remove_interclass_edges > 0:
-            adj = remove_interclass_edges(adj, labels)
+        # calculate accuracy using learned adjacency matrix
+        acc_test, loss_test, out_adj = cross_infer1(adj, data, device, features, labels,
+                                                   model_gcn, model_gcn_dgg)
 
-        output, out_adj, _ = model(features, adj)
-        acc_test = accuracy(output[data.test_mask],
-                             labels[data.test_mask].to(device))
-        loss_test = F.nll_loss(output[data.test_mask],
-                                labels[data.test_mask].to(device))
+        # calculate accuracy using ground truth adjacency matrix
+        gt_adj = remove_interclass_edges(adj, labels)
+        acc_gt, loss_gt, _ = cross_infer2(gt_adj, data, device, features, labels,
+                                                   model_gcn)
         print('test')
         calc_learned_edges_stats(out_adj, adj, labels)
-        return loss_test.item(), acc_test.item()
+        return acc_gt.item(), acc_test.item()
+
+
+def cross_infer1(adj, data, device, features, labels, model_gcn, model_gcn_dgg):
+    _, out_adj, _ = model_gcn_dgg(features, adj)
+    output, _, _ = model_gcn(features, out_adj)
+
+    acc_test = accuracy(output[data.test_mask],
+                        labels[data.test_mask].to(device))
+    loss_test = F.nll_loss(output[data.test_mask],
+                           labels[data.test_mask].to(device))
+    return acc_test, loss_test, out_adj
+
+def cross_infer2(adj, data, device, features, labels, model_gcn):
+    output, _, _ = model_gcn(features, adj)
+    acc_test = accuracy(output[data.test_mask],
+                        labels[data.test_mask].to(device))
+    loss_test = F.nll_loss(output[data.test_mask],
+                           labels[data.test_mask].to(device))
+    return acc_test, loss_test, _
 
 
 def test_best(model, features, adj, labels, idx_test, checkpt_file, device):
@@ -397,8 +460,20 @@ if __name__ == "__main__":
     cudaid = "cuda"
     device = torch.device(cudaid)
     args.data_nclasses = dataset.num_classes
-    # Load model
-    model = models.__dict__[args.model](
+
+    # Load models
+    model_gcn = models.__dict__['GCN'](
+        nfeat=dataset.num_features,
+        nlayers=args.layer,
+        nhidden=args.hidden,
+        nclass=dataset.num_classes,
+        dropout=args.dropout,
+        lamda=args.lamda,
+        alpha=args.alpha,
+        variant=args.variant,
+        args=args,
+    ).to(device)
+    model_gcn_dgg = models.__dict__['GCN_DGG_00'](
         nfeat=dataset.num_features,
         nlayers=args.layer,
         nhidden=args.hidden,
@@ -410,24 +485,22 @@ if __name__ == "__main__":
         args=args,
     ).to(device)
 
-    if "GCN" in args.model and "II" in args.model:
-        optimizer = optim.Adam(
-            [
-                {"params": model.params1, "weight_decay": args.wd1},
-                {"params": model.params2, "weight_decay": args.wd2},
-            ],
-            lr=args.lr,
-        )
-    elif 'GCN' in args.model and "II" not in args.model:
-        optimizer = optim.Adam(
-            [
-                dict(params=model.params1, weight_decay=5e-4),
-                dict(params=model.params2, weight_decay=0),
-            ],
-            lr=args.lr,
-        )  # Only perform weight-decay on first convolution.
-    elif 'SAGE' in args.model:
-        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    optimizer_gcn = optim.Adam(
+        [
+            dict(params=model_gcn.params1, weight_decay=5e-4),
+            dict(params=model_gcn.params2, weight_decay=0),
+        ],
+        lr=args.lr,
+    )  # Only perform weight-decay on first convolution.
+
+    optimizer_gcn_dgg = optim.Adam(
+        [
+            dict(params=model_gcn_dgg.params1, weight_decay=5e-4),
+            dict(params=model_gcn_dgg.params2, weight_decay=0),
+        ],
+        lr=args.lr,
+    )  # Only perform weight-decay on first convolution.
 
 
     # Run
@@ -440,17 +513,13 @@ if __name__ == "__main__":
     # writer.add_graph(model.cpu(), [features.cpu(), adj.to_dense().cpu()])
 
     for epoch in range(args.epochs):
-        loss_tra, acc_tra = train_debug(
-            args,
-            model,
-            optimizer,
-            data,
-            device,
-            epoch,
-            writer,
+        loss_tra, acc_tra = train_gcn(
+            args, model_gcn, optimizer_gcn, data, device, epoch, writer
         )
-        loss_val, acc_val = validate(model, data, device)
-        loss_test, acc_test = test(model, data, device)
+        loss_tra, acc_tra = train_gcn_dgg(
+            args, model_gcn_dgg, optimizer_gcn_dgg, data, device, epoch, writer
+        )
+        acc_gt, acc_test = test(model_gcn, model_gcn_dgg, data, device)
 
         if (epoch + 1) % 1 == 0:
             print(
@@ -459,33 +528,13 @@ if __name__ == "__main__":
                 "loss:{:.3f}".format(loss_tra),
                 "acc:{:.2f}".format(acc_tra * 100),
                 "| test",
-                "loss:{:.3f}".format(loss_test),
+                "acc_gt:{:.3f}".format(acc_gt),
                 "acc:{:.2f}".format(acc_test * 100),
             )
 
             writer.add_scalar("train/loss", loss_tra, epoch)
             writer.add_scalar("train/acc", acc_tra, epoch)
-            writer.add_scalar("val/loss", loss_val, epoch)
-            writer.add_scalar("val/acc", acc_val, epoch)
             writer.add_scalar("test/acc", acc_test, epoch)
-            writer.add_scalar("test/loss", loss_test, epoch)
-
-        if loss_val < best:
-            best = loss_val
-            best_epoch = epoch
-            acc = acc_val
-            # save_checkpoint(
-            #     checkpt_file, args, epoch, model, optimizer, lr_scheduler="None"
-            # )
-            bad_counter = 0
-        else:
-            bad_counter += 1
-
-        if bad_counter == args.patience:
-            break
-
-    # if args.test:
-    #     acc = test_best(model, features, adj, labels, idx_test, checkpt_file, device)[1]
 
     print("Train cost: {:.4f}s".format(time.time() - t_total))
     print("Load {}th epoch".format(best_epoch))

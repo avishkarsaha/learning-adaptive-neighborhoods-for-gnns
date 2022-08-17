@@ -1287,13 +1287,13 @@ def calc_learned_edges_stats(out_adj, in_adj, labels):
     # calculate ratios
     ic_ratio = out_adj_on_edge[ic_edge_mask].sum() / ic_edge_mask.sum()
     non_ic_ratio = out_adj_on_edge[non_ic_edge_mask].sum() / non_ic_edge_mask.sum()
-    ic_ratio_t = (out_adj_on_edge[ic_edge_mask] > 0.5).float().sum() / ic_edge_mask.sum()
-    non_ic_ratio_t = (out_adj_on_edge[non_ic_edge_mask] > 0.5).float().sum() / non_ic_edge_mask.sum()
+    ic_ratio_t = (out_adj_on_edge[ic_edge_mask] > 0.4).float().sum() / ic_edge_mask.sum()
+    non_ic_ratio_t = (out_adj_on_edge[non_ic_edge_mask] > 0.4).float().sum() / non_ic_edge_mask.sum()
 
-    print('ic ratios {:.3f} {:.3f}'.format(
+    print('inter class ratios {:.3f} {:.3f}'.format(
         float(ic_ratio), float(ic_ratio_t))
     )
-    print('non ic ratios {:.3f} {:.3f}'.format(
+    print('intra class ratios {:.3f} {:.3f}'.format(
         float(non_ic_ratio), float(non_ic_ratio_t))
     )
 
