@@ -26,9 +26,7 @@ parser.add_argument(
     default="/vol/research/sceneEvolution/models/GCNII",
     help="root directory",
 )
-parser.add_argument(
-    "--expname", type=str, default="temp", help="experiment name"
-)
+parser.add_argument("--expname", type=str, default="temp", help="experiment name")
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
     "--epochs", type=int, default=8000, help="Number of epochs to train."

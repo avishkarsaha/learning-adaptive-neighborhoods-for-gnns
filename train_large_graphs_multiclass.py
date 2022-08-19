@@ -61,8 +61,10 @@ parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
 parser.add_argument(
-    "--use_normalization", type=str2bool, default=False,
-    help="use normalization constants from graphsaint"
+    "--use_normalization",
+    type=str2bool,
+    default=False,
+    help="use normalization constants from graphsaint",
 )
 parser.add_argument("--model", type=str, default="GCN_MultiClass", help="model name")
 parser.add_argument(
@@ -178,12 +180,16 @@ parser.add_argument(
     "in the forward pass",
 )
 parser.add_argument(
-    "--graphsaint_bs", type=int, default=2000,
-    help="batch size of sampled subgraph using graphsaint"
+    "--graphsaint_bs",
+    type=int,
+    default=2000,
+    help="batch size of sampled subgraph using graphsaint",
 )
 parser.add_argument(
-    "--graphsaint_wl", type=int, default=2,
-    help="walk length of sampled subgraph using graphsaint"
+    "--graphsaint_wl",
+    type=int,
+    default=2,
+    help="walk length of sampled subgraph using graphsaint",
 )
 
 
@@ -198,6 +204,7 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
         },
         fn,
     )
+
 
 def train(args, model, optimizer, loader, device, epoch, writer):
     model.train()
@@ -222,9 +229,7 @@ def train(args, model, optimizer, loader, device, epoch, writer):
         loss = F.binary_cross_entropy(
             output[data.train_mask], batch_label[data.train_mask].float()
         )
-        acc_train = evaluate(
-            output[data.train_mask], batch_label[data.train_mask]
-        )
+        acc_train = evaluate(output[data.train_mask], batch_label[data.train_mask])
 
         loss.backward()
         optimizer.step()
@@ -254,9 +259,7 @@ def validate(args, model, loader, device, epoch, writer):
         batch_label = data.y.to(device)
 
         out = model(batch_feature, batch_adj, epoch, writer)
-        acc_test = evaluate(
-            out[data.val_mask], batch_label[data.val_mask]
-        )
+        acc_test = evaluate(out[data.val_mask], batch_label[data.val_mask])
 
         total_test_acc += acc_test * data.num_nodes
         total_examples += data.num_nodes
@@ -280,9 +283,7 @@ def test(args, model, loader, device, epoch, writer):
         batch_label = data.y.to(device)
 
         out = model(batch_feature, batch_adj, epoch, writer)
-        acc_test = evaluate(
-            out[data.test_mask], batch_label[data.test_mask]
-        )
+        acc_test = evaluate(out[data.test_mask], batch_label[data.test_mask])
 
         total_test_acc += acc_test * data.num_nodes
         total_examples += data.num_nodes
@@ -355,12 +356,15 @@ if __name__ == "__main__":
     dataset = pygeo_datasets.__dict__[args.data](root)
     data = dataset[0]
     row, col = data.edge_index
-    data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
+    data.edge_weight = 1.0 / degree(col, data.num_nodes)[col]  # Norm by in-degree.
     loader = GraphSAINTRandomWalkSampler(
-        data, batch_size=args.graphsaint_bs, walk_length=args.graphsaint_wl,
-        num_steps=5, sample_coverage=100,
+        data,
+        batch_size=args.graphsaint_bs,
+        walk_length=args.graphsaint_wl,
+        num_steps=5,
+        sample_coverage=100,
         save_dir=dataset.processed_dir,
-        num_workers=0
+        num_workers=0,
     )
     cudaid = "cuda"
     device = torch.device(cudaid)
@@ -404,12 +408,8 @@ if __name__ == "__main__":
         loss_train, acc_train = train(
             args, model, optimizer, loader, device, epoch, writer
         )
-        acc_val = validate(
-            args, model, loader, device, epoch, writer
-        )[1]
-        acc_test = test(
-            args, model, loader, device, epoch, writer
-        )[1]
+        acc_val = validate(args, model, loader, device, epoch, writer)[1]
+        acc_test = test(args, model, loader, device, epoch, writer)[1]
 
         if (epoch + 1) % 1 == 0:
             print(

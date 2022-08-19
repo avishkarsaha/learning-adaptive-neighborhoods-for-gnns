@@ -18,11 +18,15 @@ import torch.utils.data as Data
 import torch.nn as nn
 from torch_geometric.utils import to_scipy_sparse_matrix
 import torch_geometric.datasets as pygeo_datasets
+import torch_geometric.transforms as T
 
 import torch_geometric.loader as dataloaders
 from torch_geometric.nn import GraphConv
 from torch_geometric.utils import degree
 from sklearn.metrics import f1_score
+
+# Training settings
+from utils import remove_interclass_edges, calc_learned_edges_stats
 
 # Training settings
 parser = argparse.ArgumentParser()
@@ -35,7 +39,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220726_gcniidgg_flickr_noise0",
+    default="220816_pubmed_sagedgg00_multimodels",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -55,7 +59,7 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="Flickr", help="dateset")
+parser.add_argument("--data", default="PubMed", help="dateset")
 parser.add_argument(
     "--dataloader", default="GraphSAINTRandomWalkSampler", help="dateset"
 )
@@ -72,11 +76,12 @@ parser.add_argument(
     default=False,
     help="use normalization constants from graphsaint",
 )
-parser.add_argument("--model", type=str, default="GCNII_DGG", help="model name")
+parser.add_argument("--backbone", type=str, default="SAGE", help="backbone name")
+parser.add_argument("--model", type=str, default="SAGE_DGG_00", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.00,
+    default=0.000,
     help="percentage of noisy edges to add",
 )
 # Differentiable graph generator specific
@@ -89,7 +94,7 @@ parser.add_argument(
 parser.add_argument(
     "--extra_edge_dim",
     type=int,
-    default=2,
+    default=0,
     help="extra edge dimension (for degree etc)",
 )
 parser.add_argument(
@@ -212,7 +217,7 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
     )
 
 
-def train(args, model, optimizer, loader, device, epoch, writer):
+def train_gcn_dgg(args, model, optimizer, loader, device, epoch, writer):
     model.train()
     total_loss = total_examples = total_acc = 0
     for data in loader:
@@ -227,17 +232,57 @@ def train(args, model, optimizer, loader, device, epoch, writer):
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
+        batch_gt_adj = remove_interclass_edges(batch_adj, batch_label)
+        # mask = torch.logical_or(data.train_mask, data.val_mask)
+        mask = data.train_mask
         # zero grads
         optimizer.zero_grad()
 
         # forward pass
-        output = model(batch_feature, batch_adj, epoch, writer)
-        loss = F.nll_loss(output[data.train_mask], batch_label[data.train_mask])
-        # loss = loss_fcn(
-        #     output[data.train_mask],
-        #     F.one_hot(batch_label[data.train_mask], output.shape[-1]).float()
-        # )
-        acc_train = accuracy(output[data.train_mask], batch_label[data.train_mask])
+        output, out_adj, x_dgg = model(batch_feature, batch_adj, epoch, writer)
+        loss_1 = F.nll_loss(output[mask], batch_label[mask].to(device))
+        loss_2 = F.mse_loss(
+            out_adj.to_dense(), batch_gt_adj.to(device).to_dense().float()
+        )
+        loss = loss_1 + loss_2 * 10000
+
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * data.num_nodes
+        total_examples += data.num_nodes
+    loss_train = total_loss / total_examples
+    acc_train = total_acc / total_examples
+    return loss_train, None
+
+
+def train_gcn(args, model, optimizer, loader, device, epoch, writer):
+    model.train()
+    total_loss = total_examples = total_acc = 0
+    for data in loader:
+        # parse data
+        data = data.to(device)
+        batch_adj = to_scipy_sparse_matrix(
+            edge_index=data.edge_index, num_nodes=data.num_nodes
+        )
+        if args.edge_noise_level > 0.0:
+            batch_adj = add_noisy_edges(batch_adj, noise_level=args.edge_noise_level)
+        batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
+        batch_feature = data.x.to(device)
+        batch_label = data.y.to(device)
+
+        # get adjacency with interclass edges removed
+        batch_adj = remove_interclass_edges(batch_adj, batch_label)
+
+        # mask = torch.logical_or(data.train_mask, data.val_mask)
+        mask = data.train_mask
+
+        # zero grads
+        optimizer.zero_grad()
+
+        # forward pass
+        output, out_adj, x_dgg = model(batch_feature, batch_adj, epoch, writer)
+        loss = F.nll_loss(output[mask], batch_label[mask])
+        acc_train = accuracy(output[mask], batch_label[mask])
 
         loss.backward()
         optimizer.step()
@@ -266,8 +311,8 @@ def validate(args, model, loader, device, epoch, writer):
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
-        out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
+        output, out_adj, x_dgg = model(batch_feature, batch_adj, epoch, writer)
+        pred = output.argmax(dim=-1)
         correct = pred.eq(batch_label)
 
         total_test_acc += (
@@ -282,8 +327,9 @@ def validate(args, model, loader, device, epoch, writer):
 
 
 @torch.no_grad()
-def test(args, model, loader, device, epoch, writer):
-    model.eval()
+def test(args, model_gcn, model_gcn_dgg, loader, device, epoch, writer):
+    model_gcn.eval()
+    model_gcn_dgg.eval()
 
     total_test_acc = total_examples = 0
     for data in loader:
@@ -291,12 +337,17 @@ def test(args, model, loader, device, epoch, writer):
         batch_adj = to_scipy_sparse_matrix(
             edge_index=data.edge_index, num_nodes=data.num_nodes
         )
+        if args.edge_noise_level > 0.0:
+            batch_adj = add_noisy_edges(batch_adj, noise_level=args.edge_noise_level)
+
         batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
-        out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
+        # calculate accuracy using learned adjacency matrix
+        _, out_adj, _ = model_gcn_dgg(batch_feature, batch_adj)
+        output, _, _ = model_gcn(batch_feature, out_adj, epoch, writer)
+        pred = output.argmax(dim=-1)
         correct = pred.eq(data.y.to(device))
 
         total_test_acc += (
@@ -310,26 +361,6 @@ def test(args, model, loader, device, epoch, writer):
     return None, test_acc
 
 
-def test_best(
-    args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
-):
-    model.load_state_dict(torch.load(checkpt_file)["model_state_dict"])
-    loss_test = 0
-    acc_test = 0
-    for batch in range(2):
-        batch_adj = test_adj[batch].to(device)
-        batch_feature = test_feat[batch].to(device)
-        batch_label = test_labels[batch].to(device)
-        score, loss = evaluate(
-            batch_feature, model, test_nodes[batch], batch_adj, batch_label, loss_fcn
-        )
-        loss_test += loss
-        acc_test += score
-    acc_test /= 2
-    loss_test /= 2
-    return loss_test, acc_test
-
-
 # adapted from DGL
 def evaluate(feats, model, mask, subgraph, labels, loss_fcn):
     model.eval()
@@ -341,40 +372,22 @@ def evaluate(feats, model, mask, subgraph, labels, loss_fcn):
         return score, loss_data.item()
 
 
-def load_data():
+def load_data(args):
     if "DGG" not in args.model:
         args.pre_normalize_adj = False
 
     root = "/home/as03347/sceneEvolution/data/graph_data/{}".format(args.data)
-    if "pubmed" in args.data:
-        dataset = pygeo_datasets.__dict__["Planetoid"](
-            root=root, name="PubMed", split="public"
-        )
-        data = dataset[0]
-    else:
-        dataset = pygeo_datasets.__dict__[args.data](root)
-        data = dataset[0]
+    dataset = pygeo_datasets.__dict__["Planetoid"](
+        root=root, name=args.data, split="public", transform=T.NormalizeFeatures()
+    )
+    data = dataset[0]
 
-    if "SAINT" in args.dataloader:
-        row, col = data.edge_index
-        data.edge_weight = 1.0 / degree(col, data.num_nodes)[col]  # Norm by in-degree.
-
-        loader = dataloaders.GraphSAINTRandomWalkSampler(
-            data,
-            batch_size=args.graphsaint_bs,
-            walk_length=args.graphsaint_wl,
-            num_steps=5,
-            sample_coverage=100,
-            save_dir=dataset.processed_dir,
-            num_workers=4,
-        )
-    elif "Cluster" in args.dataloader:
-        cluster_data = dataloaders.ClusterData(
-            data, num_parts=4, recursive=False, save_dir=dataset.processed_dir
-        )
-        train_loader = dataloaders.ClusterLoader(
-            cluster_data, batch_size=20, shuffle=True, num_workers=4
-        )
+    cluster_data = dataloaders.ClusterData(
+        data, num_parts=200, recursive=False, save_dir=dataset.processed_dir
+    )
+    loader = dataloaders.ClusterLoader(
+        cluster_data, batch_size=20, shuffle=True, num_workers=4
+    )
     return dataset, loader
 
 
@@ -407,12 +420,12 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
-    dataset, loader = load_data()
+    dataset, loader = load_data(args)
     cudaid = "cuda"
     device = torch.device(cudaid)
 
     # Load model
-    model = models.__dict__[args.model](
+    model_gcn = models.__dict__[args.backbone](
         nfeat=dataset.num_features,
         nlayers=args.layer,
         nhidden=args.hidden,
@@ -424,22 +437,36 @@ if __name__ == "__main__":
         args=args,
     ).to(device)
 
-    if "GCNII" in args.model:
-        optimizer = optim.Adam(
+    model_gcn_dgg = models.__dict__[args.model](
+        nfeat=dataset.num_features,
+        nlayers=args.layer,
+        nhidden=args.hidden,
+        nclass=dataset.num_classes,
+        dropout=args.dropout,
+        lamda=args.lamda,
+        alpha=args.alpha,
+        variant=args.variant,
+        args=args,
+    ).to(device)
+
+    if "GCN" in args.backbone:
+        optimizer_gcn = optim.Adam(
             [
-                {"params": model.params1, "weight_decay": args.wd1},
-                {"params": model.params2, "weight_decay": args.wd2},
-            ],
-            lr=args.lr,
-        )
-    else:
-        optimizer = optim.Adam(
-            [
-                dict(params=model.params1, weight_decay=5e-4),
-                dict(params=model.params2, weight_decay=0),
+                dict(params=model_gcn.params1, weight_decay=5e-4),
+                dict(params=model_gcn.params2, weight_decay=0),
             ],
             lr=args.lr,
         )  # Only perform weight-decay on first convolution.
+        optimizer_gcn_dgg = optim.Adam(
+            [
+                dict(params=model_gcn_dgg.params1, weight_decay=5e-4),
+                dict(params=model_gcn_dgg.params2, weight_decay=0),
+            ],
+            lr=args.lr,
+        )  # Only perform weight-decay on first convolution.
+    elif "SAGE" in args.backbone:
+        optimizer_gcn = optim.Adam(model_gcn.parameters(), lr=args.lr)
+        optimizer_gcn_dgg = optim.Adam(model_gcn_dgg.parameters(), lr=args.lr)
 
     # Run
     t_total = time.time()
@@ -447,49 +474,30 @@ if __name__ == "__main__":
     best_epoch = 0
     acc = 0
     for epoch in range(args.epochs):
-        loss_train, acc_train = train(
-            args, model, optimizer, loader, device, epoch, writer
+        loss_tra, acc_tra = train_gcn(
+            args, model_gcn, optimizer_gcn, loader, device, epoch, writer
         )
-        acc_val = validate(args, model, loader, device, epoch, writer)[1]
-        acc_test = test(args, model, loader, device, epoch, writer)[1]
+        _, _ = train_gcn_dgg(
+            args, model_gcn_dgg, optimizer_gcn_dgg, loader, device, epoch, writer
+        )
+        _, acc_test = test(
+            args, model_gcn, model_gcn_dgg, loader, device, epoch, writer
+        )
 
         if (epoch + 1) % 1 == 0:
             print(
                 "Epoch:{:04d}".format(epoch + 1),
                 "train",
-                "loss:{:.3f}".format(loss_train),
-                "acc:{:.3f}".format(acc_train),
+                "loss:{:.3f}".format(loss_tra),
+                "acc:{:.2f}".format(acc_tra * 100),
                 "| test",
-                "f1:{:.3f}".format(acc_test * 100),
+                "acc:{:.2f}".format(acc_test * 100),
             )
 
-            writer.add_scalar("train/loss", loss_train, epoch)
-            writer.add_scalar("train/acc", acc_train, epoch)
-            writer.add_scalar("val/acc", acc_val, epoch)
+            writer.add_scalar("train/loss", loss_tra, epoch)
+            writer.add_scalar("train/acc", acc_tra, epoch)
             writer.add_scalar("test/acc", acc_test, epoch)
-
-        if acc_val > acc:
-            acc = acc_val
-            best_epoch = epoch
-            acc = acc_val
-            # save_checkpoint(
-            #     checkpt_file, args, epoch, model, optimizer,
-            #     lr_scheduler="None"
-            # )
-            bad_counter = 0
-        else:
-            bad_counter += 1
-
-        if bad_counter == args.patience:
-            break
-
-    if args.test:
-        # acc = test_best(
-        #     args, model, test_feat, test_adj, test_labels,
-        #     test_nodes, loss_fcn, device
-        # )[1]
-        acc = acc_test
 
     print("Train cost: {:.4f}s".format(time.time() - t_total))
     print("Load {}th epoch".format(best_epoch))
-    print("Test" if args.test else "Val", "f1.:{:.2f}".format(acc * 100))
+    print("Test" if args.test else "Val", "acc.:{:.1f}".format(acc * 100))

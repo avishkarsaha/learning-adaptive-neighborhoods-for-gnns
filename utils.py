@@ -59,7 +59,7 @@ def torch_normalized_adjacency(adj, mode="add_self_loops"):
         adj = adj + torch.eye(adj.shape[0], device=adj.device)
         row_sum = adj.sum(1)
         row_sum = (row_sum == 0) * 1 + row_sum
-        d_inv_sqrt = (row_sum ** -0.5).flatten()
+        d_inv_sqrt = (row_sum**-0.5).flatten()
         d_inv_sqrt[torch.isinf(d_inv_sqrt)] = 0.0
         d_mat_inv_sqrt = torch.diag(d_inv_sqrt)
         norm_adj = d_mat_inv_sqrt @ adj @ d_mat_inv_sqrt
@@ -68,7 +68,7 @@ def torch_normalized_adjacency(adj, mode="add_self_loops"):
         # adj = adj + torch.eye(adj.shape[0], device=adj.device)
         row_sum = adj.sum(1)
         row_sum = (row_sum == 0) * 1 + row_sum
-        d_inv_sqrt = (row_sum ** -0.5).flatten()
+        d_inv_sqrt = (row_sum**-0.5).flatten()
         d_inv_sqrt[torch.isinf(d_inv_sqrt)] = 0.0
         d_mat_inv_sqrt = torch.diag(d_inv_sqrt)
         norm_adj = d_mat_inv_sqrt @ adj @ d_mat_inv_sqrt
@@ -708,6 +708,7 @@ def load_reddit_example(path):
             f"Test: {test_acc:.4f}"
         )
 
+
 def load_graphsaint_example():
     import argparse
     import os.path as osp
@@ -726,17 +727,22 @@ def load_graphsaint_example():
     dataset = Flickr(path)
     data = dataset[0]
     row, col = data.edge_index
-    data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
+    data.edge_weight = 1.0 / degree(col, data.num_nodes)[col]  # Norm by in-degree.
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--use_normalization', action='store_true')
+    parser.add_argument("--use_normalization", action="store_true")
     args = parser.parse_args()
     args.use_normalization = False
 
-    loader = GraphSAINTRandomWalkSampler(data, batch_size=3000, walk_length=2,
-                                         num_steps=5, sample_coverage=100,
-                                         save_dir=dataset.processed_dir,
-                                         num_workers=4)
+    loader = GraphSAINTRandomWalkSampler(
+        data,
+        batch_size=3000,
+        walk_length=2,
+        num_steps=5,
+        sample_coverage=100,
+        save_dir=dataset.processed_dir,
+        num_workers=4,
+    )
 
     class Net(torch.nn.Module):
         def __init__(self, hidden_channels):
@@ -768,7 +774,8 @@ def load_graphsaint_example():
         def __init__(self, in_channels, out_channels, A=None, cached=False):
             super(GCNConv, self).__init__()
             self.W = nn.Parameter(
-                torch.rand(in_channels, out_channels, requires_grad=True))
+                torch.rand(in_channels, out_channels, requires_grad=True)
+            )
 
         def forward(self, x, adj):
 
@@ -800,9 +807,7 @@ def load_graphsaint_example():
             return A_hat
 
         def forward(self, x, edge_index):
-            adj = to_scipy_sparse_matrix(
-                edge_index=edge_index, num_nodes=len(x)
-            )
+            adj = to_scipy_sparse_matrix(edge_index=edge_index, num_nodes=len(x))
             adj = sparse_mx_to_torch_sparse_tensor(adj).to(device)
 
             adj = adj.to_dense()
@@ -813,12 +818,10 @@ def load_graphsaint_example():
             out = F.log_softmax(x, dim=-1)
             return out
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # model = Net(hidden_channels=256).to(device)
     model = GCN(
-        nfeat=dataset.num_node_features,
-        nhidden=64,
-        nclass=dataset.num_classes
+        nfeat=dataset.num_node_features, nhidden=64, nclass=dataset.num_classes
     ).to(device)
     # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     optimizer = torch.optim.Adam(
@@ -841,7 +844,7 @@ def load_graphsaint_example():
             if args.use_normalization:
                 edge_weight = data.edge_norm * data.edge_weight
                 out = model(data.x, data.edge_index, edge_weight)
-                loss = F.nll_loss(out, data.y, reduction='none')
+                loss = F.nll_loss(out, data.y, reduction="none")
                 loss = (loss * data.node_norm)[data.train_mask].sum()
             else:
                 out = model(data.x, data.edge_index)
@@ -852,7 +855,6 @@ def load_graphsaint_example():
             total_loss += loss.item() * data.num_nodes
             total_examples += data.num_nodes
         return total_loss / total_examples
-
 
     @torch.no_grad()
     def test():
@@ -865,12 +867,21 @@ def load_graphsaint_example():
             pred = out.argmax(dim=-1)
             correct = pred.eq(data.y.to(device))
 
-            total_train_acc += correct[data['train_mask']].sum().item() \
-                               / data['train_mask'].sum().item() * data.num_nodes
-            total_val_acc += correct[data['val_mask']].sum().item() \
-                             / data['val_mask'].sum().item() * data.num_nodes
-            total_test_acc += correct[data['test_mask']].sum().item() \
-                              / data['test_mask'].sum().item() * data.num_nodes
+            total_train_acc += (
+                correct[data["train_mask"]].sum().item()
+                / data["train_mask"].sum().item()
+                * data.num_nodes
+            )
+            total_val_acc += (
+                correct[data["val_mask"]].sum().item()
+                / data["val_mask"].sum().item()
+                * data.num_nodes
+            )
+            total_test_acc += (
+                correct[data["test_mask"]].sum().item()
+                / data["test_mask"].sum().item()
+                * data.num_nodes
+            )
             total_examples += data.num_nodes
 
             # print(correct[data['train_mask']].sum().item() \
@@ -894,7 +905,7 @@ def load_graphsaint_example():
         correct = pred.eq(data.y.to(device))
 
         accs = []
-        for _, mask in data('train_mask', 'val_mask', 'test_mask'):
+        for _, mask in data("train_mask", "val_mask", "test_mask"):
             accs.append(correct[mask].sum().item() / mask.sum().item())
         return accs
 
@@ -902,8 +913,11 @@ def load_graphsaint_example():
     for epoch in range(1, 51):
         loss = train()
         accs = test()
-        print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {accs[0]:.4f}, '
-              f'Val: {accs[1]:.4f}, Test: {accs[2]:.4f}')
+        print(
+            f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {accs[0]:.4f}, "
+            f"Val: {accs[1]:.4f}, Test: {accs[2]:.4f}"
+        )
+
 
 def load_clustergcn_reddit(path):
     import torch
@@ -918,20 +932,23 @@ def load_clustergcn_reddit(path):
     dataset = Reddit(path)
     data = dataset[0]
 
-    cluster_data = ClusterData(data, num_parts=150, recursive=False,
-                               save_dir=dataset.processed_dir)
-    train_loader = ClusterLoader(cluster_data, batch_size=20, shuffle=True,
-                                 num_workers=12)
+    cluster_data = ClusterData(
+        data, num_parts=150, recursive=False, save_dir=dataset.processed_dir
+    )
+    train_loader = ClusterLoader(
+        cluster_data, batch_size=20, shuffle=True, num_workers=12
+    )
 
-    subgraph_loader = NeighborSampler(data.edge_index, sizes=[-1], batch_size=1024,
-                                      shuffle=False, num_workers=12)
+    subgraph_loader = NeighborSampler(
+        data.edge_index, sizes=[-1], batch_size=1024, shuffle=False, num_workers=12
+    )
 
     class Net(torch.nn.Module):
         def __init__(self, in_channels, out_channels):
             super().__init__()
             self.convs = ModuleList(
-                [SAGEConv(in_channels, 128),
-                 SAGEConv(128, out_channels)])
+                [SAGEConv(in_channels, 128), SAGEConv(128, out_channels)]
+            )
 
         def forward(self, x, edge_index):
             for i, conv in enumerate(self.convs):
@@ -943,7 +960,7 @@ def load_clustergcn_reddit(path):
 
         def inference(self, x_all):
             pbar = tqdm(total=x_all.size(0) * len(self.convs))
-            pbar.set_description('Evaluating')
+            pbar.set_description("Evaluating")
 
             # Compute representations of nodes layer by layer, using *all*
             # available edges. This leads to faster computation in contrast to
@@ -953,7 +970,7 @@ def load_clustergcn_reddit(path):
                 for batch_size, n_id, adj in subgraph_loader:
                     edge_index, _, size = adj.to(device)
                     x = x_all[n_id].to(device)
-                    x_target = x[:size[1]]
+                    x_target = x[: size[1]]
                     x = conv((x, x_target), edge_index)
                     if i != len(self.convs) - 1:
                         x = F.relu(x)
@@ -967,7 +984,7 @@ def load_clustergcn_reddit(path):
 
             return x_all
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = Net(dataset.num_features, dataset.num_classes).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
 
@@ -1006,10 +1023,13 @@ def load_clustergcn_reddit(path):
         loss = train()
         if epoch % 5 == 0:
             train_acc, val_acc, test_acc = test()
-            print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {train_acc:.4f}, '
-                  f'Val: {val_acc:.4f}, test: {test_acc:.4f}')
+            print(
+                f"Epoch: {epoch:02d}, Loss: {loss:.4f}, Train: {train_acc:.4f}, "
+                f"Val: {val_acc:.4f}, test: {test_acc:.4f}"
+            )
         else:
-            print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}')
+            print(f"Epoch: {epoch:02d}, Loss: {loss:.4f}")
+
 
 def load_data_transductive(name, dataloader, path):
     """
@@ -1027,18 +1047,22 @@ def load_data_transductive(name, dataloader, path):
     # Load data
     data = pygeo_datasets.__dict__[name](path)[0]
     row, col = data.edge_index
-    data.edge_weight = 1. / degree(col, data.num_nodes)[col]  # Norm by in-degree.
+    data.edge_weight = 1.0 / degree(col, data.num_nodes)[col]  # Norm by in-degree.
 
     loader = pygeo_loaders.__dict__[dataloader](
-        data, batch_size=6000, walk_length=2,
-        num_steps=5, sample_coverage=100,
+        data,
+        batch_size=6000,
+        walk_length=2,
+        num_steps=5,
+        sample_coverage=100,
         save_dir=path,
-        num_workers=4
+        num_workers=4,
     )
 
     # return train_adj, val_adj, test_adj, train_feat, val_feat, test_feat, \
     #        train_labels, val_labels, test_labels, train_nodes, val_nodes, test_nodes,
     return loader
+
 
 def load_social(dataset):
     edge_file = open(r"data/{}.edge".format(dataset), "r")
@@ -1242,7 +1266,7 @@ def str2bool(v):
 if __name__ == "__main__":
     # load_data_transductive('Reddit', 'GraphSAINTRandomWalkSampler', root)
     # load_graphsaint_example()
-    load_clustergcn_reddit('/home/as03347/sceneEvolution/data/graph_data/reddit')
+    load_clustergcn_reddit("/home/as03347/sceneEvolution/data/graph_data/reddit")
 
 
 def remove_interclass_edges(adj, labels):
@@ -1287,14 +1311,18 @@ def calc_learned_edges_stats(out_adj, in_adj, labels):
     # calculate ratios
     ic_ratio = out_adj_on_edge[ic_edge_mask].sum() / ic_edge_mask.sum()
     non_ic_ratio = out_adj_on_edge[non_ic_edge_mask].sum() / non_ic_edge_mask.sum()
-    ic_ratio_t = (out_adj_on_edge[ic_edge_mask] > 0.4).float().sum() / ic_edge_mask.sum()
-    non_ic_ratio_t = (out_adj_on_edge[non_ic_edge_mask] > 0.4).float().sum() / non_ic_edge_mask.sum()
+    ic_ratio_t = (
+        out_adj_on_edge[ic_edge_mask] > 0.4
+    ).float().sum() / ic_edge_mask.sum()
+    non_ic_ratio_t = (
+        out_adj_on_edge[non_ic_edge_mask] > 0.4
+    ).float().sum() / non_ic_edge_mask.sum()
 
-    print('inter class ratios {:.3f} {:.3f}'.format(
-        float(ic_ratio), float(ic_ratio_t))
-    )
-    print('intra class ratios {:.3f} {:.3f}'.format(
-        float(non_ic_ratio), float(non_ic_ratio_t))
+    print("inter class ratios {:.3f} {:.3f}".format(float(ic_ratio), float(ic_ratio_t)))
+    print(
+        "intra class ratios {:.3f} {:.3f}".format(
+            float(non_ic_ratio), float(non_ic_ratio_t)
+        )
     )
 
 

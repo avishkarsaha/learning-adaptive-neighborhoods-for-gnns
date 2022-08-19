@@ -34,7 +34,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="220727_pubmed_gcndgg_noise0", help="experiment name"
+    "--expname", type=str, default="220816_pubmed_gcn_GTAdj", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -53,9 +53,10 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default='PubMed', help="dateset")
-parser.add_argument("--dataloader", default="GraphSAINTRandomWalkSampler",
-                    help="dateset")
+parser.add_argument("--data", default="PubMed", help="dateset")
+parser.add_argument(
+    "--dataloader", default="GraphSAINTRandomWalkSampler", help="dateset"
+)
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
 parser.add_argument("--lamda", type=float, default=0.5, help="lamda.")
@@ -64,15 +65,23 @@ parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
 parser.add_argument(
-    "--use_normalization", type=str2bool, default=False,
-    help="use normalization constants from graphsaint"
+    "--use_normalization",
+    type=str2bool,
+    default=False,
+    help="use normalization constants from graphsaint",
 )
-parser.add_argument("--model", type=str, default="GCN_DGG", help="model name")
+parser.add_argument("--model", type=str, default="GCN", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
     default=0.000,
     help="percentage of noisy edges to add",
+)
+parser.add_argument(
+    "--remove_interclass_edges",
+    type=float,
+    default=1.0,
+    help="What percent of interclass edges to remove",
 )
 # Differentiable graph generator specific
 parser.add_argument(
@@ -181,12 +190,16 @@ parser.add_argument(
     "in the forward pass",
 )
 parser.add_argument(
-    "--graphsaint_bs", type=int, default=2000,
-    help="batch size of sampled subgraph using graphsaint"
+    "--graphsaint_bs",
+    type=int,
+    default=2000,
+    help="batch size of sampled subgraph using graphsaint",
 )
 parser.add_argument(
-    "--graphsaint_wl", type=int, default=2,
-    help="walk length of sampled subgraph using graphsaint"
+    "--graphsaint_wl",
+    type=int,
+    default=2,
+    help="walk length of sampled subgraph using graphsaint",
 )
 
 
@@ -201,6 +214,7 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
         },
         fn,
     )
+
 
 def train(args, model, optimizer, loader, device, epoch, writer):
     model.train()
@@ -217,19 +231,17 @@ def train(args, model, optimizer, loader, device, epoch, writer):
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
+        if args.remove_interclass_edges > 0:
+            # remove_intercommunity_edges(data, adj)
+            batch_adj = remove_interclass_edges(batch_adj, batch_label)
+
         # zero grads
         optimizer.zero_grad()
 
         # forward pass
-        output = model(batch_feature, batch_adj, epoch, writer)
+        output, out_adj, x_dgg = model(batch_feature, batch_adj, epoch, writer)
         loss = F.nll_loss(output[data.train_mask], batch_label[data.train_mask])
-        # loss = loss_fcn(
-        #     output[data.train_mask],
-        #     F.one_hot(batch_label[data.train_mask], output.shape[-1]).float()
-        # )
-        acc_train = accuracy(
-            output[data.train_mask], batch_label[data.train_mask]
-        )
+        acc_train = accuracy(output[data.train_mask], batch_label[data.train_mask])
 
         loss.backward()
         optimizer.step()
@@ -258,12 +270,18 @@ def validate(args, model, loader, device, epoch, writer):
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
-        out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
+        if args.remove_interclass_edges > 0:
+            batch_adj = remove_interclass_edges(batch_adj, batch_label)
+
+        output, out_adj, x_dgg = model(batch_feature, batch_adj, epoch, writer)
+        pred = output.argmax(dim=-1)
         correct = pred.eq(batch_label)
 
-        total_test_acc += correct[data['val_mask']].sum().item() \
-                          / data['val_mask'].sum().item() * data.num_nodes
+        total_test_acc += (
+            correct[data["val_mask"]].sum().item()
+            / data["val_mask"].sum().item()
+            * data.num_nodes
+        )
         total_examples += data.num_nodes
 
     test_acc = total_test_acc / total_examples
@@ -287,12 +305,18 @@ def test(args, model, loader, device, epoch, writer):
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
-        out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
+        if args.remove_interclass_edges > 0:
+            batch_adj = remove_interclass_edges(batch_adj, batch_label)
+
+        output, out_adj, x_dgg = model(batch_feature, batch_adj, epoch, writer)
+        pred = output.argmax(dim=-1)
         correct = pred.eq(data.y.to(device))
 
-        total_test_acc += correct[data['test_mask']].sum().item() \
-                          / data['test_mask'].sum().item() * data.num_nodes
+        total_test_acc += (
+            correct[data["test_mask"]].sum().item()
+            / data["test_mask"].sum().item()
+            * data.num_nodes
+        )
         total_examples += data.num_nodes
 
     test_acc = total_test_acc / total_examples
@@ -335,16 +359,26 @@ def load_data(args):
         args.pre_normalize_adj = False
 
     root = "/home/as03347/sceneEvolution/data/graph_data/{}".format(args.data)
-    dataset = pygeo_datasets.__dict__['Planetoid'](
-        root=root, name=args.data, split='public', transform=T.NormalizeFeatures()
+    dataset = pygeo_datasets.__dict__["Planetoid"](
+        root=root, name=args.data, split="public", transform=T.NormalizeFeatures()
     )
     data = dataset[0]
 
-    cluster_data = dataloaders.ClusterData(data, num_parts=200, recursive=False,
-                               save_dir=dataset.processed_dir)
-    loader = dataloaders.ClusterLoader(cluster_data, batch_size=20, shuffle=True,
-                                 num_workers=4)
-    return dataset, loader
+    train_input_nodes = data.train_mask
+    test_input_nodes = data.test_mask
+
+    train_loader = dataloaders.NeighborLoader(
+        data, [50] * 2, shuffle=True, input_nodes=train_input_nodes
+    )
+    test_loader = dataloaders.NeighborLoader(
+        data, [3] * 2, shuffle=True, input_nodes=test_input_nodes
+    )
+
+    # cluster_data = dataloaders.ClusterData(data, num_parts=200, recursive=False,
+    #                            save_dir=dataset.processed_dir)
+    # loader = dataloaders.ClusterLoader(cluster_data, batch_size=20, shuffle=True,
+    #                              num_workers=4)
+    return dataset, train_loader, test_loader
 
 
 if __name__ == "__main__":
@@ -376,7 +410,7 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
-    dataset, loader = load_data(args)
+    dataset, train_loader, test_loader = load_data(args)
     cudaid = "cuda"
     device = torch.device(cudaid)
 
@@ -417,14 +451,9 @@ if __name__ == "__main__":
     acc = 0
     for epoch in range(args.epochs):
         loss_train, acc_train = train(
-            args, model, optimizer, loader, device, epoch, writer
+            args, model, optimizer, train_loader, device, epoch, writer
         )
-        acc_val = validate(
-            args, model, loader, device, epoch, writer
-        )[1]
-        acc_test = test(
-            args, model, loader, device, epoch, writer
-        )[1]
+        acc_test = test(args, model, test_loader, device, epoch, writer)[1]
 
         if (epoch + 1) % 1 == 0:
             print(
@@ -438,23 +467,7 @@ if __name__ == "__main__":
 
             writer.add_scalar("train/loss", loss_train, epoch)
             writer.add_scalar("train/acc", acc_train, epoch)
-            writer.add_scalar("val/acc", acc_val, epoch)
             writer.add_scalar("test/acc", acc_test, epoch)
-
-        if acc_val > acc:
-            acc = acc_val
-            best_epoch = epoch
-            acc = acc_val
-            # save_checkpoint(
-            #     checkpt_file, args, epoch, model, optimizer,
-            #     lr_scheduler="None"
-            # )
-            bad_counter = 0
-        else:
-            bad_counter += 1
-
-        if bad_counter == args.patience:
-            break
 
     if args.test:
         # acc = test_best(

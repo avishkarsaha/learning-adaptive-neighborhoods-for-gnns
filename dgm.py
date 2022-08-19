@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import torch
 from torch_cluster import fps
+
 # import pytorch3d
 # from pytorch3d.ops import sample_farthest_points
 import torch.nn as nn
@@ -1135,8 +1136,13 @@ class DGG_LearnableK_debug(nn.Module):
         )
         self.k_W = nn.Parameter(torch.rand(latent_dim, latent_dim, requires_grad=True))
 
-        if self.k_net_mode == "input_deg" or self.k_net_mode == "learn_normalized_degree":
-            self.k_net = LearnableKEncoder(in_dim=3, latent_dim=latent_dim // 4, args=args)
+        if (
+            self.k_net_mode == "input_deg"
+            or self.k_net_mode == "learn_normalized_degree"
+        ):
+            self.k_net = LearnableKEncoder(
+                in_dim=3, latent_dim=latent_dim // 4, args=args
+            )
         else:
             self.k_net = LearnableKEncoder(
                 in_dim=latent_dim // 2, latent_dim=latent_dim // 4, args=args
@@ -1215,12 +1221,12 @@ class DGG_LearnableK_debug(nn.Module):
 
             if self.args.symmetric_noise:
                 # add a symmetric gumbel noise matrix
-                G = torch.zeros_like(edge_p).squeeze(0) # [N, N]
+                G = torch.zeros_like(edge_p).squeeze(0)  # [N, N]
                 i, j = torch.triu_indices(G.shape[0], G.shape[1], 1)
                 gumbel_noise = self.gumbel.sample([len(i)]).cuda()
                 G[i, j] = gumbel_noise
                 G.T[i, j] = gumbel_noise
-                G = G.unsqueeze(0)      # [1, N, N]
+                G = G.unsqueeze(0)  # [1, N, N]
             else:
                 # asymmetric gumbel noise matrix
                 G = self.gumbel.sample(log_p.shape).cuda()
@@ -1236,7 +1242,7 @@ class DGG_LearnableK_debug(nn.Module):
             )
             return self.return_hard_or_soft(
                 in_adj, pert_edge_p, idxs=None, k=None, threshold=0.5
-            )   # STEP 1
+            )  # STEP 1
 
         # get smooth top-k
         k, _ = self.k_estimate_net(
@@ -1285,11 +1291,11 @@ class DGG_LearnableK_debug(nn.Module):
         #     actual_k.retain_grad()
         #     topk_edge_p.retain_grad()
 
-        self.get_adj_diff_stats(
-            in_adj, topk_edge_p, k, writer=writer, epoch=epoch
-        )
+        self.get_adj_diff_stats(in_adj, topk_edge_p, k, writer=writer, epoch=epoch)
 
-        return self.return_hard_or_soft(in_adj, topk_edge_p, idxs=idxs, k=k, threshold=0.5)
+        return self.return_hard_or_soft(
+            in_adj, topk_edge_p, idxs=idxs, k=k, threshold=0.5
+        )
 
     def return_hard_or_soft(self, in_adj, edge_p, idxs=None, k=None, threshold=0.8):
 
@@ -1311,7 +1317,7 @@ class DGG_LearnableK_debug(nn.Module):
         return adj_hard.squeeze(0).to_sparse()
 
     def get_adj_diff_stats(
-            self, in_adj, topk_edge_p=None, k=None, writer=None, epoch=None
+        self, in_adj, topk_edge_p=None, k=None, writer=None, epoch=None
     ):
         topk_edge_p = topk_edge_p.squeeze(0)
         in_adj = in_adj.to_dense()
@@ -1336,15 +1342,16 @@ class DGG_LearnableK_debug(nn.Module):
             if writer is not None:
                 writer.add_scalar("train_stats/on_edge_mean", on_edge_diff_mean, epoch)
                 writer.add_scalar("train_stats/on_edge_std", on_edge_diff_std, epoch)
-                writer.add_scalar("train_stats/off_edge_mean", off_edge_diff_mean, epoch)
+                writer.add_scalar(
+                    "train_stats/off_edge_mean", off_edge_diff_mean, epoch
+                )
                 writer.add_scalar("train_stats/off_edge_std", off_edge_diff_std, epoch)
-                writer.add_scalar("train_stats/in_deg_mean", in_adj.sum(-1).mean(),
-                                  epoch)
+                writer.add_scalar(
+                    "train_stats/in_deg_mean", in_adj.sum(-1).mean(), epoch
+                )
                 if k is not None:
                     writer.add_scalar("train_stats/k_diff_mean", k_diff_mean, epoch)
                     writer.add_scalar("train_stats/k_mean", k.flatten().mean(), epoch)
-
-
 
         return topk_edge_p
 
@@ -1685,8 +1692,8 @@ class DGG_LearnableK_debug(nn.Module):
 
             # distance
             t = -1.0  # this t parameter makes a significant difference
-            dist = torch.linalg.vector_norm(u - v, dim=-1, ord=2)   # [1, N]
-            edge_prob = torch.exp(t * dist).unsqueeze(-1)   # [1, N, 1]
+            dist = torch.linalg.vector_norm(u - v, dim=-1, ord=2)  # [1, N]
+            edge_prob = torch.exp(t * dist).unsqueeze(-1)  # [1, N, 1]
 
             edge_feat = torch.concat(
                 [u, v, u_deg, v_deg, edge_prob], dim=-1
@@ -1734,7 +1741,6 @@ class DGG(nn.Module):
     def __init__(self, in_dim=32, latent_dim=64, args=None):
         super().__init__()
 
-
         self.args = args
 
         # Node encoder
@@ -1745,21 +1751,15 @@ class DGG(nn.Module):
 
         # Edge ranker
         self.edge_encoder = nn.Sequential(
-            nn.Linear(latent_dim + self.args.extra_edge_dim, latent_dim),
-            nn.LeakyReLU()
+            nn.Linear(latent_dim + self.args.extra_edge_dim, latent_dim), nn.LeakyReLU()
         )
 
         # Degree estimator
-        self.degree_decoder = nn.Sequential(
-            nn.Linear(1, 1, bias=True),
-            nn.LeakyReLU()
-        )
+        self.degree_decoder = nn.Sequential(nn.Linear(1, 1, bias=True), nn.LeakyReLU())
 
         # Top-k selector
 
-
         self.var_grads = {"edge_p": [], "first_k": [], "out_adj": []}
-
 
     def forward(self, x, adj, noise=True, writer=None, epoch=None):
         """
@@ -1788,7 +1788,7 @@ class DGG(nn.Module):
         v = x[adj.indices()[1, :]]  # [E, dim]
         uv_diff = u - v
         edge_feat = self.edge_encoder(uv_diff)
-        edge_rank = edge_feat.sum(-1)   # [E]
+        edge_rank = edge_feat.sum(-1)  # [E]
         edge_rank = torch.sigmoid(edge_rank)
         edge_rank = torch.sparse.FloatTensor(adj.indices(), edge_rank, adj.shape)
         edge_rank = edge_rank.to_dense()
@@ -1801,10 +1801,12 @@ class DGG(nn.Module):
         # sort edge ranks descending
         srt_edge_rank, idxs = torch.sort(edge_rank, dim=-1, descending=True)
 
-        t = torch.arange(N).reshape(1, N).cuda()   # base domain [1, N]
+        t = torch.arange(N).reshape(1, N).cuda()  # base domain [1, N]
         # k = k.unsqueeze(0)                          # [N, 1]
         w = 1  # sharpness parameter
-        first_k = 1 - 0.5 * (1 + torch.tanh((t - k) / w))  # higher k = more items closer to 1
+        first_k = 1 - 0.5 * (
+            1 + torch.tanh((t - k) / w)
+        )  # higher k = more items closer to 1
         first_k = first_k + 1.0
 
         # Multiply edge rank by first k
@@ -1838,7 +1840,7 @@ class DGG(nn.Module):
         return adj_hard.squeeze(0).to_sparse()
 
     def get_adj_diff_stats(
-            self, in_adj, topk_edge_p=None, k=None, writer=None, epoch=None
+        self, in_adj, topk_edge_p=None, k=None, writer=None, epoch=None
     ):
         topk_edge_p = topk_edge_p.squeeze(0)
         in_adj = in_adj.to_dense()
@@ -1863,15 +1865,16 @@ class DGG(nn.Module):
             if writer is not None:
                 writer.add_scalar("train_stats/on_edge_mean", on_edge_diff_mean, epoch)
                 writer.add_scalar("train_stats/on_edge_std", on_edge_diff_std, epoch)
-                writer.add_scalar("train_stats/off_edge_mean", off_edge_diff_mean, epoch)
+                writer.add_scalar(
+                    "train_stats/off_edge_mean", off_edge_diff_mean, epoch
+                )
                 writer.add_scalar("train_stats/off_edge_std", off_edge_diff_std, epoch)
-                writer.add_scalar("train_stats/in_deg_mean", in_adj.sum(-1).mean(),
-                                  epoch)
+                writer.add_scalar(
+                    "train_stats/in_deg_mean", in_adj.sum(-1).mean(), epoch
+                )
                 if k is not None:
                     writer.add_scalar("train_stats/k_diff_mean", k_diff_mean, epoch)
                     writer.add_scalar("train_stats/k_mean", k.flatten().mean(), epoch)
-
-
 
         return topk_edge_p
 
@@ -2135,7 +2138,7 @@ def graph_conv():
     y = W @ h
     print("gconv", y.shape)
     print(y)
-    loss = (adj ** 2).sum()
+    loss = (adj**2).sum()
     loss.backward()
     print("w grad")
     print(W.grad)
@@ -2263,7 +2266,7 @@ def diff_top_k_test():
     print("adj")
     print(adj)
     adj.retain_grad()
-    loss = (adj ** 2).sum()
+    loss = (adj**2).sum()
     loss.backward()
     print(x.grad)
     print(adj.grad)
@@ -2298,7 +2301,7 @@ def learnable_k_test(input, hard):
     print("adj")
     print(adj)
     adj.retain_grad()
-    loss = (adj ** 2).sum()
+    loss = (adj**2).sum()
     loss.backward()
 
     print(x.grad)
@@ -2338,7 +2341,7 @@ def tanh_test_exp(k):
     x_topk = x * y
 
     # loss = (torch.abs(x_topk - x_topk_gt) ** 2).sum()
-    loss = (x_topk ** 2).sum()
+    loss = (x_topk**2).sum()
 
     y.retain_grad()
     w.retain_grad()
@@ -2372,7 +2375,7 @@ def tanh_test(k):
     x_topk = x * y
 
     # loss = (torch.abs(x_topk - x_topk_gt) ** 2).sum()
-    loss = (x_topk ** 2).sum()
+    loss = (x_topk**2).sum()
 
     y.retain_grad()
     w.retain_grad()

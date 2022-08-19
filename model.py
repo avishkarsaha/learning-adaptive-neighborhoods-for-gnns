@@ -8,6 +8,7 @@ from dgm import DGG_LearnableK, DGG_LearnableK_debug, DGG
 from utils import torch_normalized_adjacency, calc_learned_edges_stats
 from torch_geometric.datasets import KarateClub
 from torch_geometric.nn import SAGEConv, DenseGraphConv
+from torch_geometric.utils import remove_self_loops, add_self_loops
 
 
 class GraphConvolution(nn.Module):
@@ -42,6 +43,7 @@ class GraphConvolution(nn.Module):
             output = output + input
         return output
 
+
 class DenseGraphConvolution(nn.Module):
     def __init__(self, in_features, out_features, residual=False, variant=False):
         super(DenseGraphConvolution, self).__init__()
@@ -74,12 +76,13 @@ class DenseGraphConvolution(nn.Module):
             output = output + input
         return output
 
+
 class SAGE(torch.nn.Module):
     def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, **kwargs):
         super().__init__()
         self.convs = torch.nn.ModuleList()
-        self.convs.append(DenseGraphConv(nfeat, nhidden, aggr='mean'))
-        self.convs.append(DenseGraphConv(nhidden, nclass, aggr='mean'))
+        self.convs.append(DenseGraphConv(nfeat, nhidden, aggr="mean"))
+        self.convs.append(DenseGraphConv(nhidden, nclass, aggr="mean"))
 
     def normalize_adj(self, A):
         # assert no self loops
@@ -93,7 +96,7 @@ class SAGE(torch.nn.Module):
         A_hat = torch.mm(torch.mm(D, A_hat), D)
         return A_hat
 
-    def forward(self, x, adj, epoch=None, writer=None):
+    def forward(self, x, adj, epoch=None, writer=None, **kwargs):
         """
         Args:
             x: node features [N, dim]
@@ -113,16 +116,17 @@ class SAGE(torch.nn.Module):
                 x = x.relu_()
                 x = F.dropout(x, p=0.5, training=self.training)
         x = F.log_softmax(x, dim=-1)
-        return x.squeeze(0)
+        return x.squeeze(0), None, None
+
 
 class SAGE_DGG(torch.nn.Module):
     def __init__(
-            self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs
+        self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs
     ):
         super().__init__()
         self.convs = torch.nn.ModuleList()
-        self.convs.append(DenseGraphConv(nfeat, nhidden, aggr='mean'))
-        self.convs.append(DenseGraphConv(nhidden, nclass, aggr='mean'))
+        self.convs.append(DenseGraphConv(nfeat, nhidden, aggr="mean"))
+        self.convs.append(DenseGraphConv(nhidden, nclass, aggr="mean"))
 
         self.dgg_adj_input = args.dgg_adj_input
         self.dggs = nn.ModuleList()
@@ -152,7 +156,7 @@ class SAGE_DGG(torch.nn.Module):
         )
         return adj
 
-    def forward(self, x, in_adj, noise=True, epoch=None, writer=None):
+    def forward(self, x, in_adj, noise=True, epoch=None, writer=None, **kwargs):
         """
         Args:
             x: node features [N, dim]
@@ -165,7 +169,7 @@ class SAGE_DGG(torch.nn.Module):
         """
         # add self-loops
         in_adj = (
-                in_adj.to_dense() + torch.eye(in_adj.shape[0], device=in_adj.device)
+            in_adj.to_dense() + torch.eye(in_adj.shape[0], device=in_adj.device)
         ).to_sparse()
 
         # coalesce to track grads
@@ -175,14 +179,10 @@ class SAGE_DGG(torch.nn.Module):
             if i < len(self.dggs):
                 if self.dgg_adj_input == "input_adj":
                     # always use input adjacency
-                    unnorm_adj = self.dgg_net(
-                        x, i, in_adj.coalesce(), writer, epoch
-                    )
+                    unnorm_adj = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
                 else:
                     # use updated adjacency
-                    unnorm_adj = self.dgg_net(
-                        x, i, unnorm_adj, writer, epoch
-                    )
+                    unnorm_adj = self.dgg_net(x, i, unnorm_adj, writer, epoch)
                 norm_adj = self.normalize_adj(unnorm_adj.to_dense())
 
             x = conv(x, norm_adj)
@@ -192,16 +192,114 @@ class SAGE_DGG(torch.nn.Module):
         x = F.log_softmax(x, dim=-1)
         return x.squeeze(0)
 
+
+class SAGE_DGG_00(torch.nn.Module):
+    def __init__(
+        self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None, **kwargs
+    ):
+        super().__init__()
+        self.convs = torch.nn.ModuleList()
+        self.convs.append(DenseGraphConv(nhidden, nhidden, aggr="mean"))
+        self.convs.append(DenseGraphConv(nhidden, nclass, aggr="mean"))
+
+        self.dgg_adj_input = args.dgg_adj_input
+        self.dggs = nn.ModuleList()
+        dgg1 = DGG(in_dim=nfeat, latent_dim=nhidden, args=args)
+        self.dggs.append(dgg1)
+
+    def normalize_adj(self, A_hat):
+        """
+        renormalisation of adjacency matrix
+        Args:
+            A_hat: adj mat with self loops [N, N]
+
+        Returns:
+            A_hat: renormalized adjaceny [N, N]
+
+        """
+        row_sum = A_hat.sum(-1)
+        row_sum = (row_sum) ** -0.5
+        D = torch.diag(row_sum)
+        A_hat = torch.mm(torch.mm(D, A_hat), D)
+        return A_hat
+
+    def normalize_adj_gcn(self, A_hat):
+        """
+        renormalisation of adjacency matrix
+        Args:
+            A_hat: adj mat with self loops [N, N]
+
+        Returns:
+            A_hat: renormalized adjaceny [N, N]
+
+        """
+        D = torch.diag(torch.sum(A_hat, 1))
+        D = D.inverse().sqrt()
+        A_hat = torch.mm(torch.mm(D, A_hat), D)
+        return A_hat
+
+    def forward(self, x, in_adj, noise=True, epoch=None, writer=None, **kwargs):
+        """
+        Args:
+            x: node features [N, dim]
+            A: sparse unnormalized adjacency matrix without self loops
+            epoch: epoch number
+            writer: tensorboard summary writer
+
+        Returns:
+            out: class predictions for each node [N, n_class]
+        """
+        # add self-loops
+        in_adj = (
+            in_adj.to_dense() + torch.eye(in_adj.shape[0], device=in_adj.device)
+        ).to_sparse()
+
+        # coalesce to track grads
+        unnorm_adj = in_adj.coalesce()
+
+        for i, conv in enumerate(self.convs):
+            if i < len(self.dggs):
+                if self.dgg_adj_input == "input_adj":
+                    # always use input adjacency
+                    unnorm_adj, x_dgg = self.dgg_net(
+                        x, i, in_adj.coalesce(), writer, epoch
+                    )
+                else:
+                    # use updated adjacency
+                    unnorm_adj, x_dgg = self.dgg_net(x, i, unnorm_adj, writer, epoch)
+                norm_adj = self.normalize_adj(unnorm_adj.to_dense())
+                x = x_dgg
+
+            x = conv(x, norm_adj)
+            if i < len(self.convs) - 1:
+                x = x.relu_()
+                x = F.dropout(x, p=0.5, training=self.training)
+        x = F.log_softmax(x, dim=-1)
+        return x.squeeze(0), unnorm_adj, x_dgg
+
+    def dgg_net(self, x, i, unnorm_adj, writer, epoch):
+        # learn adjacency (sparse tensor)
+        adj = self.dggs[i](x=x, adj=unnorm_adj, noise=False, writer=writer, epoch=epoch)
+        return adj
+
+
 class GAT(nn.Module):
-    def __init__(self, data, nhid=8, nhead=8, nhead_out=1, alpha=0.2, dropout=0.6):
-        super(GAT, self).__init__()
-        nfeat, nclass = data.num_features, data.num_classes
-        self.attentions = [GATConv(nfeat, nhid, dropout=dropout, alpha=alpha) for _ in range(nhead)]
-        self.out_atts = [GATConv(nhid * nhead, nclass, dropout=dropout, alpha=alpha) for _ in range(nhead_out)]
+    def __init__(
+            self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None,
+            nhead=8, nhead_out=1, alpha=0.2, dropout=0.6, **kwargs
+    ):
+        super().__init__()
+        self.attentions = [
+            GATConv(nfeat, nhidden, dropout=dropout, alpha=alpha) for _ in range(nhead)
+        ]
+        self.out_atts = [
+            GATConv(nhidden * nhead, nclass, dropout=dropout, alpha=alpha)
+            for _ in range(nhead_out)
+        ]
         for i, attention in enumerate(self.attentions):
-            self.add_module('attention_{}'.format(i), attention)
+            self.add_module("attention_{}".format(i), attention)
         for i, attention in enumerate(self.out_atts):
-            self.add_module('out_att{}'.format(i), attention)
+            self.add_module("out_att{}".format(i), attention)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -210,12 +308,99 @@ class GAT(nn.Module):
         for att in self.out_atts:
             att.reset_parameters()
 
-    def forward(self, data):
-        x, edge_list = data.features, data.edge_list
-        x = torch.cat([att(x, edge_list) for att in self.attentions], dim=1)
+    def forward(self, x, in_adj=None, edge_index=None, epoch=None, writer=None):
+        edge_index, _ = remove_self_loops(edge_index)
+        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+
+        x = torch.cat([att(x, edge_index) for att in self.attentions], dim=1)
         x = F.elu(x)
-        x = torch.sum(torch.stack([att(x, edge_list) for att in self.out_atts]), dim=0) / len(self.out_atts)
-        return F.log_softmax(x, dim=1)
+        x = torch.sum(
+            torch.stack([att(x, edge_index) for att in self.out_atts]), dim=0
+        ) / len(self.out_atts)
+        return F.log_softmax(x, dim=1), None, None
+
+
+class GAT_DGG_00(nn.Module):
+    def __init__(
+            self, nfeat=32, nlayers=None, nhidden=32, nclass=10, args=None,
+            nhead=8, nhead_out=1, alpha=0.2, dropout=0.6, **kwargs
+    ):
+        super().__init__()
+        self.attentions = [
+            GATConv_DGG(nhidden, nhidden, dropout=dropout, alpha=alpha) for _ in range(nhead)
+        ]
+        self.out_atts = [
+            GATConv_DGG(nhidden * nhead, nclass, dropout=dropout, alpha=alpha)
+            for _ in range(nhead_out)
+        ]
+
+        self.dgg = DGG(in_dim=nfeat, latent_dim=nhidden, args=args)
+
+        for i, attention in enumerate(self.attentions):
+            self.add_module("attention_{}".format(i), attention)
+        for i, attention in enumerate(self.out_atts):
+            self.add_module("out_att{}".format(i), attention)
+        self.reset_parameters()
+
+
+    def normalize_adj(self, A_hat):
+        """
+        renormalisation of adjacency matrix
+        Args:
+            A_hat: adj mat with self loops [N, N]
+
+        Returns:
+            A_hat: renormalized adjaceny [N, N]
+
+        """
+        row_sum = A_hat.sum(-1)
+        row_sum = (row_sum) ** -0.5
+        D = torch.diag(row_sum)
+        A_hat = torch.mm(torch.mm(D, A_hat), D)
+        return A_hat
+
+    def normalize_adj_gcn(self, A_hat):
+        """
+        renormalisation of adjacency matrix
+        Args:
+            A_hat: adj mat with self loops [N, N]
+
+        Returns:
+            A_hat: renormalized adjaceny [N, N]
+
+        """
+        D = torch.diag(torch.sum(A_hat, 1))
+        D = D.inverse().sqrt()
+        A_hat = torch.mm(torch.mm(D, A_hat), D)
+        return A_hat
+
+    def reset_parameters(self):
+        for att in self.attentions:
+            att.reset_parameters()
+        for att in self.out_atts:
+            att.reset_parameters()
+
+    def forward(self, x, in_adj=None, edge_index=None, epoch=None, writer=None):
+
+        edge_index, _ = remove_self_loops(edge_index)
+        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+
+        # # add self-loops
+        in_adj = (
+            in_adj.to_dense() + torch.eye(in_adj.shape[0], device=in_adj.device)
+        ).to_sparse()
+        in_adj = in_adj.coalesce()
+
+        # # always use input adjacency
+        unnorm_adj, x_dgg = self.dgg(x=x, adj=in_adj)
+        # unnorm_adj = unnorm_adj.to_dense()
+        x = x_dgg
+        x = torch.cat([att(x, edge_index, unnorm_adj) for att in self.attentions], dim=1)
+        x = F.elu(x)
+        x = torch.sum(
+            torch.stack([att(x, edge_index, unnorm_adj) for att in self.out_atts]), dim=0
+        ) / len(self.out_atts)
+        return F.log_softmax(x, dim=1), unnorm_adj, x_dgg
 
 
 class GATConv(nn.Module):
@@ -227,11 +412,11 @@ class GATConv(nn.Module):
         self.alpha = alpha
 
         self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features))
-        self.a = nn.Parameter(torch.zeros(size=(2*out_features, 1)))
+        self.a = nn.Parameter(torch.zeros(size=(2 * out_features, 1)))
         if bias:
             self.bias = nn.Parameter(torch.FloatTensor(out_features))
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -240,17 +425,19 @@ class GATConv(nn.Module):
             self.bias.data.fill_(0)
         nn.init.xavier_uniform_(self.a.data, gain=1.414)
 
-    def forward(self, x, edge_list):
+    def forward(self, x, edge_index, adj=None):
+
         x = F.dropout(x, self.dropout, training=self.training)
         h = torch.matmul(x, self.weight)
 
-        source, target = edge_list
+        source, target = edge_index[0], edge_index[1]
         a_input = torch.cat([h[source], h[target]], dim=1)
         e = F.leaky_relu(torch.matmul(a_input, self.a), negative_slope=self.alpha)
 
         N = h.size(0)
-        attention = -1e20*torch.ones([N, N], device=device, requires_grad=True)
+        attention = -1e20 * torch.ones([N, N], device=x.device, requires_grad=True)
         attention[source, target] = e[:, 0]
+
         attention = F.softmax(attention, dim=1)
         attention = F.dropout(attention, self.dropout, training=self.training)
         h = F.dropout(h, self.dropout, training=self.training)
@@ -259,6 +446,52 @@ class GATConv(nn.Module):
             h_prime = h_prime + self.bias
 
         return h_prime
+
+class GATConv_DGG(nn.Module):
+    def __init__(self, in_features, out_features, dropout, alpha, bias=True):
+        super().__init__()
+        self.dropout = dropout
+        self.in_features = in_features
+        self.out_features = out_features
+        self.alpha = alpha
+
+        self.weight = nn.Parameter(torch.FloatTensor(in_features, out_features))
+        self.a = nn.Parameter(torch.zeros(size=(2 * out_features, 1)))
+        if bias:
+            self.bias = nn.Parameter(torch.FloatTensor(out_features))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.weight.data, gain=1.414)
+        if self.bias is not None:
+            self.bias.data.fill_(0)
+        nn.init.xavier_uniform_(self.a.data, gain=1.414)
+
+    def forward(self, x, edge_list, adj):
+        x = F.dropout(x, self.dropout, training=self.training)
+        h = torch.matmul(x, self.weight)
+
+        source, target = edge_list[0], edge_list[1]
+        a_input = torch.cat([h[source], h[target]], dim=1)
+        e = F.leaky_relu(torch.matmul(a_input, self.a), negative_slope=self.alpha)
+
+        N = h.size(0)
+        attention = -1e20 * torch.ones([N, N], device=x.device, requires_grad=True)
+        attention[source, target] = e[:, 0]
+        attention = attention * adj.to_dense()
+
+        attention = F.softmax(attention, dim=1)
+        attention = F.dropout(attention, self.dropout, training=self.training)
+        h = F.dropout(h, self.dropout, training=self.training)
+        h_prime = torch.matmul(attention, h)
+
+        if self.bias is not None:
+            h_prime = h_prime + self.bias
+
+        return h_prime
+
 
 class GCNConv(nn.Module):
     def __init__(self, in_channels, out_channels, A=None, cached=False):
@@ -633,6 +866,7 @@ class GCN(torch.nn.Module):
     """
     GCN for binary node classification
     """
+
     def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, **kwargs):
         super(GCN, self).__init__()
         self.conv1 = GCNConv(nfeat, nhidden)
@@ -689,6 +923,7 @@ class GCN_MultiClass(torch.nn.Module):
     """
     GCN for multi-label node classification
     """
+
     def __init__(self, nfeat=32, nlayers=None, nhidden=32, nclass=10, **kwargs):
         super(GCN_MultiClass, self).__init__()
         self.conv1 = GCNConv(nfeat, nhidden)
@@ -934,14 +1169,10 @@ class GCN_DGG(torch.nn.Module):
             if i < len(self.dggs):
                 if self.dgg_adj_input == "input_adj":
                     # always use input adjacency
-                    unnorm_adj = self.dgg_net(
-                        x, i, in_adj.coalesce(), writer, epoch
-                    )
+                    unnorm_adj = self.dgg_net(x, i, in_adj.coalesce(), writer, epoch)
                 else:
                     # use updated adjacency
-                    unnorm_adj = self.dgg_net(
-                        x, i, unnorm_adj, writer, epoch
-                    )
+                    unnorm_adj = self.dgg_net(x, i, unnorm_adj, writer, epoch)
                 norm_adj = self.normalize_adj(unnorm_adj.to_dense())
 
             # diagonal_w = norm_adj[
@@ -1074,9 +1305,7 @@ class GCN_DGG_00(torch.nn.Module):
                     )
                 else:
                     # use updated adjacency
-                    unnorm_adj, x_dgg = self.dgg_net(
-                        x, i, unnorm_adj, writer, epoch
-                    )
+                    unnorm_adj, x_dgg = self.dgg_net(x, i, unnorm_adj, writer, epoch)
                 norm_adj = self.normalize_adj(unnorm_adj.to_dense())
                 x = x_dgg
 
@@ -1106,9 +1335,7 @@ class GCN_DGG_00(torch.nn.Module):
 
     def dgg_net(self, x, i, unnorm_adj, writer, epoch):
         # learn adjacency (sparse tensor)
-        adj = self.dggs[i](
-            x=x, adj=unnorm_adj, noise=False, writer=writer, epoch=epoch
-        )
+        adj = self.dggs[i](x=x, adj=unnorm_adj, noise=False, writer=writer, epoch=epoch)
         return adj
 
 

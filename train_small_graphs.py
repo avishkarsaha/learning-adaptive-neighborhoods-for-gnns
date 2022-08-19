@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220816_cora_gcndgg00_debug_hardAtTestTime",
+    default="220818_cora_gatdgg00",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -62,7 +62,7 @@ parser.add_argument(
     default=0,
     help="number of classes, set during runtime",
 )
-parser.add_argument("--model", type=str, default="GCN_DGG_00", help="model name")
+parser.add_argument("--model", type=str, default="GAT_DGG_00", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
@@ -243,16 +243,12 @@ def train(args, model, optimizer, features, adj, labels, idx_train, device):
     return loss_train.item(), acc_train.item()
 
 
-def train_debug(
-    args, model, optimizer, data, device, epoch, writer
-):
+def train_debug(args, model, optimizer, data, device, epoch, writer):
     model.train()
 
     # parse data
     data = data.to(device)
-    adj = to_scipy_sparse_matrix(
-        edge_index=data.edge_index, num_nodes=data.num_nodes
-    )
+    adj = to_scipy_sparse_matrix(edge_index=data.edge_index, num_nodes=data.num_nodes)
     if args.edge_noise_level > 0.0:
         adj = add_noisy_edges(adj, noise_level=args.edge_noise_level)
 
@@ -266,16 +262,14 @@ def train_debug(
 
     optimizer.zero_grad()
 
-    gt_adj = remove_interclass_edges(adj, labels)
-
-    output, out_adj, x_dgg = model(features, adj, epoch=epoch, writer=writer)
+    output, out_adj, x_dgg = model(
+        features, adj, edge_index=data.edge_index, epoch=epoch, writer=writer
+    )
     acc_train = accuracy(output[data.train_mask], labels[data.train_mask].to(device))
     loss_train = F.nll_loss(output[data.train_mask], labels[data.train_mask].to(device))
     loss_train.backward()
 
     optimizer.step()
-    # print('train')
-    # calc_learned_edges_stats(out_adj, adj, labels)
 
     return loss_train.item(), acc_train.item()
 
@@ -296,11 +290,9 @@ def validate(model, data, device):
         if args.remove_interclass_edges > 0:
             adj = remove_interclass_edges(adj, labels)
 
-        output, out_adj, _ = model(features, adj)
-        acc_val = accuracy(output[data.val_mask],
-                             labels[data.val_mask].to(device))
-        loss_val = F.nll_loss(output[data.val_mask],
-                                labels[data.val_mask].to(device))
+        output, out_adj, _ = model(features, adj, edge_index=data.edge_index,)
+        acc_val = accuracy(output[data.val_mask], labels[data.val_mask].to(device))
+        loss_val = F.nll_loss(output[data.val_mask], labels[data.val_mask].to(device))
         return loss_val.item(), acc_val.item()
 
 
@@ -320,13 +312,13 @@ def test(model, data, device):
         if args.remove_interclass_edges > 0:
             adj = remove_interclass_edges(adj, labels)
 
-        output, out_adj, _ = model(features, adj)
-        acc_test = accuracy(output[data.test_mask],
-                             labels[data.test_mask].to(device))
-        loss_test = F.nll_loss(output[data.test_mask],
-                                labels[data.test_mask].to(device))
-        print('test')
-        calc_learned_edges_stats(out_adj, adj, labels)
+        output, out_adj, _ = model(features, adj, edge_index=data.edge_index)
+        acc_test = accuracy(output[data.test_mask], labels[data.test_mask].to(device))
+        loss_test = F.nll_loss(
+            output[data.test_mask], labels[data.test_mask].to(device)
+        )
+        # print('test')
+        # calc_learned_edges_stats(out_adj, adj, labels)
         return loss_test.item(), acc_test.item()
 
 
@@ -345,21 +337,10 @@ def load_data(args):
         args.pre_normalize_adj = False
 
     root = "/home/as03347/sceneEvolution/data/graph_data/{}".format(args.data)
-    dataset = pygeo_datasets.__dict__['Planetoid'](
+    dataset = pygeo_datasets.__dict__["Planetoid"](
         root=root, name=args.data, split=args.split, transform=T.NormalizeFeatures()
     )
     data = dataset[0]
-
-    # transform = T.GDC(
-    #     self_loop_weight=1,
-    #     normalization_in='sym',
-    #     normalization_out='col',
-    #     diffusion_kwargs=dict(method='ppr', alpha=0.05),
-    #     sparsification_kwargs=dict(method='topk', k=128, dim=0),
-    #     exact=True,
-    # )
-    #
-    # data = transform(data)
 
     return data, dataset
 
@@ -418,7 +399,7 @@ if __name__ == "__main__":
             ],
             lr=args.lr,
         )
-    elif 'GCN' in args.model and "II" not in args.model:
+    elif "GCN" in args.model and "II" not in args.model:
         optimizer = optim.Adam(
             [
                 dict(params=model.params1, weight_decay=5e-4),
@@ -426,9 +407,10 @@ if __name__ == "__main__":
             ],
             lr=args.lr,
         )  # Only perform weight-decay on first convolution.
-    elif 'SAGE' in args.model:
+    elif "SAGE" in args.model:
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
-
+    elif 'GAT' in args.model:
+        optimizer= optim.Adam(model.parameters(), lr=0.005, weight_decay=5e-4)
 
     # Run
     t_total = time.time()
