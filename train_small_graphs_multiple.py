@@ -34,7 +34,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220816_cora_gatgg00_multiple_models",
+    default="220901_cora_gategg00_multiple_models_semisup_fixedK2",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -69,8 +69,8 @@ parser.add_argument(
     default=0,
     help="number of classes, set during runtime",
 )
-parser.add_argument("--backbone", type=str, default="GAT", help="model name")
-parser.add_argument("--model", type=str, default="GAT_DGG_00", help="model name")
+parser.add_argument("--backbone", type=str, default="GCN", help="model name")
+parser.add_argument("--model", type=str, default="GCN_DGG_Ablations", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
@@ -228,29 +228,6 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
     )
 
 
-def train(args, model, optimizer, features, adj, labels, idx_train, device):
-    model.train()
-    optimizer.zero_grad()
-    output = model(features, adj)
-    acc_train = accuracy(output[idx_train], labels[idx_train].to(device))
-    loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
-    loss_train.backward()
-
-    # for name, p in model.dggs.named_parameters():
-    #     print(name, p.grad.max().item(),  p.grad.mean().item(), p.grad.min().item())
-
-    # if args.grad_clip != -1:
-    #     torch.nn.utils.clip_grad_norm_(
-    #         model.dggs.parameters(), max_norm=args.grad_clip
-    #     )
-    #
-    # for name, p in model.dggs.named_parameters():
-    #     print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
-
-    optimizer.step()
-    return loss_train.item(), acc_train.item()
-
-
 def train_gcn_dgg(args, model, optimizer, data, device, epoch, writer):
     model.train()
 
@@ -265,8 +242,8 @@ def train_gcn_dgg(args, model, optimizer, data, device, epoch, writer):
     labels = data.y.to(device)
 
     optimizer.zero_grad()
-
     gt_adj = remove_interclass_edges(adj, labels)
+    mask = torch.logical_or(data.train_mask, data.val_mask)
 
     output, out_adj, x_dgg = model(
         features, adj, edge_index=data.edge_index, epoch=epoch, writer=writer
@@ -275,8 +252,15 @@ def train_gcn_dgg(args, model, optimizer, data, device, epoch, writer):
     loss_train_1 = F.nll_loss(
         output[data.train_mask], labels[data.train_mask].to(device)
     )
-    loss_train_2 = F.mse_loss(out_adj.to_dense(), gt_adj.to(device).to_dense().float())
-    loss_train = loss_train_1 + loss_train_2 * 10000
+    loss_train_2 = F.mse_loss(
+        out_adj.to_dense()[mask],
+        gt_adj.to(device).to_dense().float()[mask]
+    )
+    loss_train_3 = F.mse_loss(
+        out_adj.to_dense().T[mask],
+        gt_adj.to(device).to_dense().float().T[mask]
+    )
+    loss_train = loss_train_1 + loss_train_2 * 10000 + loss_train_3 * 10000
     loss_train.backward()
 
     optimizer.step()
@@ -299,12 +283,21 @@ def train_gcn(args, model, optimizer, data, device, epoch, writer):
     features = data.x.to(device)
     labels = data.y.to(device)
 
-    # adj = remove_interclass_edges(adj, labels)
+    # mask
+    mask = torch.logical_or(data.train_mask, data.val_mask)
+
+    # train gcn with 'ground-truth' adjacency matrix
+    full_gt_adj = remove_interclass_edges(adj, labels)
+    gt_adj = adj.to_dense()
+    gt_adj[mask] = full_gt_adj.to_dense()[mask].float()
+    gt_adj.T[mask] = full_gt_adj.to_dense().T[mask].float()
+    gt_adj = gt_adj.to_sparse()
+    data.edge_index = gt_adj.coalesce().indices()
 
     optimizer.zero_grad()
 
     output, out_adj, x_dgg = model(
-        features, adj, edge_index=data.edge_index, epoch=epoch, writer=writer
+        features, gt_adj, edge_index=data.edge_index, epoch=epoch, writer=writer
     )
     acc_train = accuracy(output[data.train_mask], labels[data.train_mask].to(device))
     loss_train = F.nll_loss(output[data.train_mask], labels[data.train_mask].to(device))
@@ -369,13 +362,14 @@ def test(model_gcn, model_gcn_dgg, data, device):
         )
 
         # calculate accuracy using ground truth adjacency matrix
-        gt_adj = remove_interclass_edges(adj, labels)
-        acc_gt, loss_gt, _ = cross_infer2(
-            gt_adj, data, device, features, labels, model_gcn
-        )
-        print("test")
-        calc_learned_edges_stats(out_adj, adj, labels)
-        return acc_gt.item(), acc_test.item()
+        # gt_adj = remove_interclass_edges(adj, labels)
+        # data.edge_index = gt_adj.coalesce().indices()
+        # acc_gt, loss_gt, _ = cross_infer2(
+        #     gt_adj, data, device, features, labels, model_gcn
+        # )
+        # print("test")
+        # calc_learned_edges_stats(out_adj, adj, labels)
+        return 0.0, acc_test.item()
 
 
 def cross_infer1(adj, data, device, features, labels, model_gcn, model_gcn_dgg):
@@ -392,16 +386,6 @@ def cross_infer2(adj, data, device, features, labels, model_gcn):
     acc_test = accuracy(output[data.test_mask], labels[data.test_mask].to(device))
     loss_test = F.nll_loss(output[data.test_mask], labels[data.test_mask].to(device))
     return acc_test, loss_test, _
-
-
-def test_best(model, features, adj, labels, idx_test, checkpt_file, device):
-    model.load_state_dict(torch.load(checkpt_file)["model_state_dict"])
-    model.eval()
-    with torch.no_grad():
-        output = model(features, adj)
-        loss_test = F.nll_loss(output[idx_test], labels[idx_test].to(device))
-        acc_test = accuracy(output[idx_test], labels[idx_test].to(device))
-        return loss_test.item(), acc_test.item()
 
 
 def load_data(args):

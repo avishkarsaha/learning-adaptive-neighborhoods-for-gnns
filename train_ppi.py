@@ -26,14 +26,19 @@ parser.add_argument(
     default="/vol/research/sceneEvolution/models/GCNII",
     help="root directory",
 )
-parser.add_argument("--expname", type=str, default="temp", help="experiment name")
+parser.add_argument(
+    "--expname", type=str, default="220827_ppi_gcn", help="experiment name"
+)
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
     "--epochs", type=int, default=8000, help="Number of epochs to train."
 )
 parser.add_argument("--lr", type=float, default=0.001, help="Initial learning rate.")
 parser.add_argument(
-    "--wd", type=float, default=0, help="Weight decay (L2 loss on parameters)."
+    "--wd1", type=float, default=0.01, help="weight decay (L2 loss on parameters)."
+)
+parser.add_argument(
+    "--wd2", type=float, default=5e-4, help="weight decay (L2 loss on parameters)."
 )
 parser.add_argument("--layer", type=int, default=9, help="Number of hidden layers.")
 parser.add_argument("--hidden", type=int, default=2048, help="Number of hidden layers.")
@@ -49,7 +54,19 @@ parser.add_argument("--variant", type=str2bool, default=False, help="GCN* model.
 parser.add_argument(
     "--test", type=str2bool, default=True, help="evaluation on test set."
 )
-parser.add_argument("--model", type=str, default="GCNIIppi_DGG", help="model name")
+parser.add_argument("--model", type=str, default="GCN_MultiClass", help="model name")
+parser.add_argument(
+    "--edge_noise_level",
+    type=float,
+    default=0.000,
+    help="percentage of noisy edges to add",
+)
+parser.add_argument(
+    "--remove_interclass_edges",
+    type=float,
+    default=1.0,
+    help="What percent of interclass edges to remove",
+)
 # Differentiable graph generator specific
 parser.add_argument(
     "--dgm_dim",
@@ -188,8 +205,13 @@ def train(
         batch_adj = train_adj[batch[0]].to(device)
         batch_feature = train_feat[batch[0]].to(device)
         batch_label = train_labels[batch[0]].to(device)
+
+        # get adjacency with interclass edges removed
+        if args.remove_interclass_edges > 0:
+            batch_adj = remove_multi_interclass_edges(batch_adj, batch_label)
+
         optimizer.zero_grad()
-        output = model(batch_feature, batch_adj, writer, epoch)
+        output, out_adj, x_dgg = model(batch_feature, batch_adj, writer=writer, epoch=epoch)
         loss_train = loss_fcn(
             output[: train_nodes[batch]], batch_label[: train_nodes[batch]]
         )
@@ -199,42 +221,6 @@ def train(
     loss_tra /= 20
     acc_tra /= 20
     return loss_tra, acc_tra
-
-
-def train_debug(
-    args, model, optimizer, features, adj, labels, idx_train, device, epoch, writer
-):
-    model.train()
-    optimizer.zero_grad()
-    output = model(features, adj, epoch, writer)
-    acc_train = accuracy(output[idx_train], labels[idx_train].to(device))
-    loss_train = F.nll_loss(output[idx_train], labels[idx_train].to(device))
-    loss_train.backward()
-
-    # k_net_grads =  torch.cat(
-    #     [p.grad.flatten() for name, p in model.dggs.named_parameters()
-    #      if 'input_degree' in name and p.grad is not None]
-    # ).flatten()
-    # convs_grads = torch.cat(
-    #     [p.grad.flatten() for name, p in model.fcs[0].named_parameters()
-    #      if p.grad is not None]
-    # ).flatten()
-    # # writer.add_histogram('train/in_deg_grad', k_net_grads, epoch)
-    # writer.add_histogram('train/fcs_grad', convs_grads, epoch)
-
-    # print('k grad', float(k_net_grads.mean()))
-    # print('fcs grad', float(convs_grads.mean()))
-
-    # if args.grad_clip != -1:
-    #     torch.nn.utils.clip_grad_norm_(
-    #         model.dggs.parameters(), max_norm=args.grad_clip
-    #     )
-    #
-    # for name, p in model.dggs.named_parameters():
-    #     print(name, p.grad.max().item(), p.grad.mean().item(),p.grad.min().item())
-
-    optimizer.step()
-    return loss_train.item(), acc_train.item()
 
 
 def validate(args, model, val_feat, val_adj, val_labels, val_nodes, loss_fcn, device):
@@ -262,26 +248,11 @@ def test(args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, de
         batch_adj = test_adj[batch].to(device)
         batch_feature = test_feat[batch].to(device)
         batch_label = test_labels[batch].to(device)
-        score, loss = evaluate(
-            batch_feature, model, test_nodes[batch], batch_adj, batch_label, loss_fcn
-        )
-        loss_test += loss
-        acc_test += score
-    acc_test /= 2
-    loss_test /= 2
-    return loss_test, acc_test
 
+        # get adjacency with interclass edges removed
+        if args.remove_interclass_edges > 0:
+            batch_adj = remove_multi_interclass_edges(batch_adj, batch_label)
 
-def test_best(
-    args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
-):
-    model.load_state_dict(torch.load(checkpt_file)["model_state_dict"])
-    loss_test = 0
-    acc_test = 0
-    for batch in range(2):
-        batch_adj = test_adj[batch].to(device)
-        batch_feature = test_feat[batch].to(device)
-        batch_label = test_labels[batch].to(device)
         score, loss = evaluate(
             batch_feature, model, test_nodes[batch], batch_adj, batch_label, loss_fcn
         )
@@ -296,7 +267,7 @@ def test_best(
 def evaluate(feats, model, idx, subgraph, labels, loss_fcn):
     model.eval()
     with torch.no_grad():
-        output = model(feats, subgraph)
+        output, out_adj, x_dgg = model(feats, subgraph)
         loss_data = loss_fcn(output[:idx], labels[:idx].float())
         predict = np.where(output[:idx].data.cpu().numpy() > 0.5, 1, 0)
         score = f1_score(labels[:idx].data.cpu().numpy(), predict, average="micro")
@@ -332,8 +303,6 @@ if __name__ == "__main__":
     writer = SummaryWriter(tbdir)
 
     # Load data
-    if "DGG" not in args.model:
-        args.pre_normalize_adj = False
     (
         train_adj,
         val_adj,
@@ -347,7 +316,7 @@ if __name__ == "__main__":
         train_nodes,
         val_nodes,
         test_nodes,
-    ) = load_ppi_from_disk(normalize_adj=args.pre_normalize_adj)
+    ) = load_ppi_from_disk(normalize_adj=True)
 
     idx = torch.LongTensor(range(20))
     loader = Data.DataLoader(dataset=idx, batch_size=1, shuffle=True, num_workers=0)
@@ -369,7 +338,28 @@ if __name__ == "__main__":
     ).to(device)
     loss_fcn = torch.nn.BCELoss()
 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    if "GCN" in args.model and "II" in args.model:
+        optimizer = optim.Adam(
+            [
+                {"params": model.params1, "weight_decay": args.wd1},
+                {"params": model.params2, "weight_decay": args.wd2},
+            ],
+            lr=args.lr,
+        )
+    elif "GCN" in args.model and "II" not in args.model:
+        optimizer = optim.Adam(
+            [
+                dict(params=model.params1, weight_decay=5e-4),
+                dict(params=model.params2, weight_decay=0),
+            ],
+            lr=args.lr,
+        )  # Only perform weight-decay on first convolution.
+    elif "SAGE" in args.model:
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    elif 'GAT' in args.model:
+        optimizer = optim.Adam(model.parameters(), lr=0.005, weight_decay=5e-4)
+    elif 'GCN_MultiClass' in args.model:
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     # Run
     t_total = time.time()
@@ -412,25 +402,6 @@ if __name__ == "__main__":
             writer.add_scalar("val/loss", loss_val, epoch)
             writer.add_scalar("val/acc", acc_val, epoch)
             writer.add_scalar("test/acc", acc_test, epoch)
-
-        if acc_val > acc:
-            acc = acc_val
-            best_epoch = epoch
-            acc = acc_val
-            # save_checkpoint(
-            #     checkpt_file, args, epoch, model, optimizer, lr_scheduler="None"
-            # )
-            bad_counter = 0
-        else:
-            bad_counter += 1
-
-        if bad_counter == args.patience:
-            break
-
-    if args.test:
-        acc = test_best(
-            args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
-        )[1]
 
     print("Train cost: {:.4f}s".format(time.time() - t_total))
     print("Load {}th epoch".format(best_epoch))

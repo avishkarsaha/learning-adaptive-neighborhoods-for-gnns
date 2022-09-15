@@ -933,7 +933,7 @@ def load_clustergcn_reddit(path):
     data = dataset[0]
 
     cluster_data = ClusterData(
-        data, num_parts=150, recursive=False, save_dir=dataset.processed_dir
+        data, num_parts=500, recursive=False, save_dir=dataset.processed_dir
     )
     train_loader = ClusterLoader(
         cluster_data, batch_size=20, shuffle=True, num_workers=12
@@ -1263,12 +1263,6 @@ def str2bool(v):
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
-if __name__ == "__main__":
-    # load_data_transductive('Reddit', 'GraphSAINTRandomWalkSampler', root)
-    # load_graphsaint_example()
-    load_clustergcn_reddit("/home/as03347/sceneEvolution/data/graph_data/reddit")
-
-
 def remove_interclass_edges(adj, labels):
     """remove interclass edges using ground truth labels"""
     adj = adj.coalesce()
@@ -1287,6 +1281,27 @@ def remove_interclass_edges(adj, labels):
     adj = torch.sparse.FloatTensor(non_ic_idxs, values, shape)
     return adj
 
+def remove_multi_interclass_edges(adj, labels):
+    """remove interclass edges for multilabel classes using ground truth labels"""
+    adj = adj.coalesce()
+    u_idx = adj.indices()[0]
+    v_idx = adj.indices()[1]
+
+    # label each unique multiclass label
+    unique_rows, s_labels = torch.unique(labels, dim=0, return_inverse=True, sorted=False)
+
+    u_label = s_labels[u_idx]
+    v_label = s_labels[v_idx]
+
+    ic_edge_mask = u_label != v_label  # inter-class edge mask
+    ic_idxs = adj.indices()[:, ic_edge_mask]
+    non_ic_edge_mask = ~ic_edge_mask  # intra-class edge mask
+    non_ic_idxs = adj.indices()[:, non_ic_edge_mask]
+
+    values = torch.ones_like(non_ic_idxs[0])
+    shape = adj.shape
+    adj = torch.sparse.FloatTensor(non_ic_idxs, values, shape)
+    return adj
 
 def calc_learned_edges_stats(out_adj, in_adj, labels):
     """
@@ -1325,7 +1340,6 @@ def calc_learned_edges_stats(out_adj, in_adj, labels):
         )
     )
 
-
 def remove_intercommunity_edges(data, adj):
     """
     perform community detection and then remove edges between communities
@@ -1346,3 +1360,32 @@ def remove_intercommunity_edges(data, adj):
     v_label = labels[v_idx]
 
     print(len(c))
+
+
+def remove_central_edges(data, adj):
+    """
+    get edge betweeness centrality and remove the high ones
+    """
+
+    # convert torch_geometric data instance to networkx.Graph
+    G_nx = to_networkx(data)
+
+    print('calculating edge centrality')
+    centrality = nx.edge_betweenness_centrality(G_nx)
+
+    # remove edges between communities
+    adj = adj.coalesce()
+    u_idx = adj.indices()[0]
+    v_idx = adj.indices()[1]
+    u_label = labels[u_idx]
+    v_label = labels[v_idx]
+
+    print(len(c))
+
+if __name__ == "__main__":
+    # load_data_transductive('Reddit', 'GraphSAINTRandomWalkSampler', root)
+    # load_graphsaint_example()
+    load_clustergcn_reddit("/home/as03347/sceneEvolution/data/graph_data/reddit")
+
+
+

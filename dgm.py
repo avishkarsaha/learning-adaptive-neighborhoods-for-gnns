@@ -1879,6 +1879,159 @@ class DGG(nn.Module):
         return topk_edge_p
 
 
+class DGG_Ablations(nn.Module):
+    """
+    Differentiable graph generator for ICLR
+    """
+
+    def __init__(self, in_dim=32, latent_dim=64, args=None):
+        super().__init__()
+
+        self.args = args
+
+        # Node encoder
+        self.node_encoder = nn.Sequential(
+            nn.Linear(in_dim, latent_dim),
+            nn.LeakyReLU(),
+        )
+
+        # Edge ranker
+        self.edge_encoder = nn.Sequential(
+            nn.Linear(latent_dim + self.args.extra_edge_dim, latent_dim), nn.LeakyReLU()
+        )
+
+        # Degree estimator
+        self.degree_decoder = nn.Sequential(nn.Linear(1, 1, bias=True), nn.LeakyReLU())
+
+        # Top-k selector
+
+        self.var_grads = {"edge_p": [], "first_k": [], "out_adj": []}
+
+    def forward(self, x, adj, k=None, writer=None, epoch=None):
+        """
+
+        Args:
+            x:
+            adj:
+            noise:
+            writer:
+            epoch:
+
+        Returns:
+
+        """
+
+        assert x.ndim == 2
+        assert len(adj.shape) == 2
+
+        N = x.shape[0]  # number of nodes
+
+        # Encode node features [N, in_dim] ---> [N, h]
+        x = self.node_encoder(x)
+
+        # Rank edges using encoded node features [N, h] ----> [E]
+        u = x[adj.indices()[0, :]]  # [E, dim]
+        v = x[adj.indices()[1, :]]  # [E, dim]
+        uv_diff = u - v
+        edge_feat = self.edge_encoder(uv_diff)
+        edge_rank = edge_feat.sum(-1)  # [E]
+        edge_rank = torch.sigmoid(edge_rank)
+        noise = torch.rand(edge_rank.shape, device=x.device) * 2 - 1
+        edge_rank = edge_rank + noise
+        edge_rank = torch.sigmoid(edge_rank)
+        edge_rank = torch.sparse.FloatTensor(adj.indices(), edge_rank, adj.shape)
+        edge_rank = edge_rank.to_dense()
+
+        # Select top-k edges
+        # sort edge ranks descending
+        srt_edge_rank, idxs = torch.sort(edge_rank, dim=-1, descending=True)
+
+        if k is not None:
+            srt_edge_rank[:, k:] = 0
+            first_k_ranks = srt_edge_rank
+        else:
+            # Estimate node degree using encoded node features and edge rankings
+            k = edge_rank.sum(-1).unsqueeze(-1)
+            k = self.degree_decoder(k)  # [N, 1]
+
+            t = torch.arange(N).reshape(1, N).cuda()  # base domain [1, N]
+            # k = k.unsqueeze(0)                          # [N, 1]
+            w = 1  # sharpness parameter
+            first_k = 1 - 0.5 * (
+                1 + torch.tanh((t - k) / w)
+            )  # higher k = more items closer to 1
+            first_k = first_k + 1.0
+
+            # Multiply edge rank by first k
+            first_k_ranks = srt_edge_rank * first_k
+
+        # Unsort
+        out_adj = first_k_ranks.clone().scatter_(dim=-1, index=idxs, src=first_k_ranks)
+        # out_adj = out_adj[adj.indices()[0, :], adj.indices()[1, :]]
+        # out_adj = torch.sparse.FloatTensor(adj.indices(), out_adj, adj.shape)
+
+        # return top-k edges and encoded node features
+        return out_adj.to_sparse(), x
+
+    def return_hard_or_soft(self, in_adj, edge_p, idxs=None, k=None, threshold=0.8):
+
+        # return soft
+        if not self.hard:
+            return edge_p.squeeze(0).to_sparse()
+
+        # if hard adj desired, threshold first_k and scatter
+        adj_hard = torch.ones_like(edge_p)
+
+        if idxs is not None:
+            adj_hard.scatter_(dim=-1, index=idxs, src=(edge_p > threshold).float())
+
+        adj_hard = (adj_hard - edge_p).detach() + edge_p
+
+        assert torch.any(torch.isnan(adj_hard)) == False
+        assert torch.any(torch.isinf(adj_hard)) == False
+
+        return adj_hard.squeeze(0).to_sparse()
+
+    def get_adj_diff_stats(
+        self, in_adj, topk_edge_p=None, k=None, writer=None, epoch=None
+    ):
+        topk_edge_p = topk_edge_p.squeeze(0)
+        in_adj = in_adj.to_dense()
+
+        assert topk_edge_p.shape == in_adj.shape
+
+        on_edge_mask = (in_adj > 0).float()
+        off_edge_mask = (in_adj == 0).float()
+        on_edge_diff = (in_adj - topk_edge_p) * on_edge_mask
+        off_edge_diff = (in_adj - topk_edge_p) * off_edge_mask
+        on_edge_diff_mean = on_edge_diff[on_edge_diff != 0].mean()
+        on_edge_diff_std = on_edge_diff[on_edge_diff != 0].std()
+        off_edge_diff_mean = off_edge_diff[off_edge_diff != 0].mean()
+        off_edge_diff_std = off_edge_diff[off_edge_diff != 0].std()
+
+        if k is not None:
+            k_diff = k.flatten() - in_adj.sum(-1)
+            k_diff_mean = k_diff.mean()
+            k_diff_std = k_diff.std()
+
+        if self.training:
+            if writer is not None:
+                writer.add_scalar("train_stats/on_edge_mean", on_edge_diff_mean, epoch)
+                writer.add_scalar("train_stats/on_edge_std", on_edge_diff_std, epoch)
+                writer.add_scalar(
+                    "train_stats/off_edge_mean", off_edge_diff_mean, epoch
+                )
+                writer.add_scalar("train_stats/off_edge_std", off_edge_diff_std, epoch)
+                writer.add_scalar(
+                    "train_stats/in_deg_mean", in_adj.sum(-1).mean(), epoch
+                )
+                if k is not None:
+                    writer.add_scalar("train_stats/k_diff_mean", k_diff_mean, epoch)
+                    writer.add_scalar("train_stats/k_mean", k.flatten().mean(), epoch)
+
+        return topk_edge_p
+
+
 class LearnableKEncoder(nn.Module):
     def __init__(self, in_dim, latent_dim, learn_k_bias=False, args=None):
         super(LearnableKEncoder, self).__init__()

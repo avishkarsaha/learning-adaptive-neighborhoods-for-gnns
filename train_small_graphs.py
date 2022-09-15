@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220818_cora_gatdgg00",
+    default="220906_cora_gcn_edgeCentrality",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -62,7 +62,7 @@ parser.add_argument(
     default=0,
     help="number of classes, set during runtime",
 )
-parser.add_argument("--model", type=str, default="GAT_DGG_00", help="model name")
+parser.add_argument("--model", type=str, default="GCN", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
@@ -72,7 +72,7 @@ parser.add_argument(
 parser.add_argument(
     "--remove_interclass_edges",
     type=float,
-    default=0.0,
+    default=1.0,
     help="What percent of interclass edges to remove",
 )
 # Differentiable graph generator specific
@@ -258,7 +258,10 @@ def train_debug(args, model, optimizer, data, device, epoch, writer):
 
     if args.remove_interclass_edges > 0:
         # remove_intercommunity_edges(data, adj)
+        adj = remove_central_edges(data, adj)
         adj = remove_interclass_edges(adj, labels)
+
+        data.edge_index = adj.coalesce().indices()
 
     optimizer.zero_grad()
 
@@ -311,6 +314,7 @@ def test(model, data, device):
 
         if args.remove_interclass_edges > 0:
             adj = remove_interclass_edges(adj, labels)
+            data.edge_index = adj.coalesce().indices()
 
         output, out_adj, _ = model(features, adj, edge_index=data.edge_index)
         acc_test = accuracy(output[data.test_mask], labels[data.test_mask].to(device))
@@ -378,6 +382,7 @@ if __name__ == "__main__":
     cudaid = "cuda"
     device = torch.device(cudaid)
     args.data_nclasses = dataset.num_classes
+
     # Load model
     model = models.__dict__[args.model](
         nfeat=dataset.num_features,

@@ -35,7 +35,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220726_gcniidgg_flickr_noise0",
+    default="220906_reddit_gcndgg00_multiloss",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -55,9 +55,9 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="Flickr", help="dateset")
+parser.add_argument("--data", default="Reddit", help="dateset")
 parser.add_argument(
-    "--dataloader", default="GraphSAINTRandomWalkSampler", help="dateset"
+    "--dataloader", default="SAINT", help="dataloader type"
 )
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
@@ -72,12 +72,18 @@ parser.add_argument(
     default=False,
     help="use normalization constants from graphsaint",
 )
-parser.add_argument("--model", type=str, default="GCNII_DGG", help="model name")
+parser.add_argument("--model", type=str, default="GCN_DGG_00", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.00,
+    default=0.000,
     help="percentage of noisy edges to add",
+)
+parser.add_argument(
+    "--remove_interclass_edges",
+    type=float,
+    default=0.0,
+    help="What percent of interclass edges to remove",
 )
 # Differentiable graph generator specific
 parser.add_argument(
@@ -89,7 +95,7 @@ parser.add_argument(
 parser.add_argument(
     "--extra_edge_dim",
     type=int,
-    default=2,
+    default=0,
     help="extra edge dimension (for degree etc)",
 )
 parser.add_argument(
@@ -212,7 +218,7 @@ def save_checkpoint(fn, args, epoch, model, optimizer, lr_scheduler):
     )
 
 
-def train(args, model, optimizer, loader, device, epoch, writer):
+def train_gcn_dgg(args, model, optimizer, loader, device, epoch, writer):
     model.train()
     total_loss = total_examples = total_acc = 0
     for data in loader:
@@ -227,23 +233,72 @@ def train(args, model, optimizer, loader, device, epoch, writer):
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
+        batch_gt_adj = remove_interclass_edges(batch_adj, batch_label)
+        # mask = torch.logical_or(data.train_mask, data.val_mask)
+        mask = data.train_mask
+
         # zero grads
         optimizer.zero_grad()
 
         # forward pass
-        output = model(batch_feature, batch_adj, epoch, writer)
-        loss = F.nll_loss(output[data.train_mask], batch_label[data.train_mask])
-        # loss = loss_fcn(
-        #     output[data.train_mask],
-        #     F.one_hot(batch_label[data.train_mask], output.shape[-1]).float()
-        # )
-        acc_train = accuracy(output[data.train_mask], batch_label[data.train_mask])
+        output, out_adj, x_dgg = model(
+            batch_feature, batch_adj, edge_index=data.edge_index, epoch=epoch, writer=writer
+        )
+        loss_1 = F.nll_loss(output[mask], batch_label[mask].to(device))
+        loss_2 = F.mse_loss(
+            out_adj.to_dense(), batch_gt_adj.to(device).to_dense().float()
+        )
+        loss = loss_1 + loss_2 * 10000
 
         loss.backward()
         optimizer.step()
-        total_loss += loss.item() * data.num_nodes
-        total_acc += acc_train.item() * data.num_nodes
-        total_examples += data.num_nodes
+        num_nodes = mask.sum().item()
+        total_loss += loss.item() * num_nodes
+        total_examples += num_nodes
+    loss_train = total_loss / total_examples
+    acc_train = total_acc / total_examples
+    return loss_train, acc_train
+
+def train_gcn(args, model, optimizer, loader, device, epoch, writer):
+    model.train()
+    total_loss = total_examples = total_acc = 0
+    for data in loader:
+        # parse data
+        data = data.to(device)
+        batch_adj = to_scipy_sparse_matrix(
+            edge_index=data.edge_index, num_nodes=data.num_nodes
+        )
+        if args.edge_noise_level > 0.0:
+            batch_adj = add_noisy_edges(batch_adj, noise_level=args.edge_noise_level)
+        batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
+        batch_feature = data.x.to(device)
+        batch_label = data.y.to(device)
+
+        # get adjacency with interclass edges removed
+        if args.remove_interclass_edges > 0:
+            batch_adj = remove_interclass_edges(batch_adj, batch_label)
+            data.edge_index = batch_adj.coalesce().indices()
+
+        # mask = torch.logical_or(data.train_mask, data.val_mask)
+        mask = data.train_mask
+
+        # zero grads
+        optimizer.zero_grad()
+
+        # forward pass
+        output, out_adj, x_dgg = model(
+            batch_feature, batch_adj, edge_index=data.edge_index, epoch=epoch,
+            writer=writer
+        )
+        loss = F.nll_loss(output[mask], batch_label[mask])
+        acc_train = accuracy(output[mask], batch_label[mask])
+
+        loss.backward()
+        optimizer.step()
+        num_nodes = mask.sum().item()
+        total_loss += loss.item() * num_nodes
+        total_acc += acc_train.item() * num_nodes
+        total_examples += num_nodes
     loss_train = total_loss / total_examples
     acc_train = total_acc / total_examples
     return loss_train, acc_train
@@ -291,43 +346,32 @@ def test(args, model, loader, device, epoch, writer):
         batch_adj = to_scipy_sparse_matrix(
             edge_index=data.edge_index, num_nodes=data.num_nodes
         )
+        if args.edge_noise_level > 0.0:
+            batch_adj = add_noisy_edges(batch_adj, noise_level=args.edge_noise_level)
+
         batch_adj = sparse_mx_to_torch_sparse_tensor(batch_adj).to(device)
         batch_feature = data.x.to(device)
         batch_label = data.y.to(device)
 
-        out = model(batch_feature, batch_adj, epoch, writer)
-        pred = out.argmax(dim=-1)
+        # get adjacency with interclass edges removed
+        if args.remove_interclass_edges > 0:
+            batch_adj = remove_interclass_edges(batch_adj, batch_label)
+            data.edge_index = batch_adj.coalesce().indices()
+
+        # calculate accuracy using learned adjacency matrix
+        output, out_adj, x_dgg = model(
+            batch_feature, batch_adj, edge_index=data.edge_index, epoch=epoch,
+            writer=writer
+        )
+        pred = output.argmax(dim=-1)
         correct = pred.eq(data.y.to(device))
 
-        total_test_acc += (
-            correct[data["test_mask"]].sum().item()
-            / data["test_mask"].sum().item()
-            * data.num_nodes
-        )
-        total_examples += data.num_nodes
+        num_nodes = data["test_mask"].sum().item()
+        total_test_acc += correct[data["test_mask"]].sum().item()
+        total_examples += num_nodes
 
     test_acc = total_test_acc / total_examples
     return None, test_acc
-
-
-def test_best(
-    args, model, test_feat, test_adj, test_labels, test_nodes, loss_fcn, device
-):
-    model.load_state_dict(torch.load(checkpt_file)["model_state_dict"])
-    loss_test = 0
-    acc_test = 0
-    for batch in range(2):
-        batch_adj = test_adj[batch].to(device)
-        batch_feature = test_feat[batch].to(device)
-        batch_label = test_labels[batch].to(device)
-        score, loss = evaluate(
-            batch_feature, model, test_nodes[batch], batch_adj, batch_label, loss_fcn
-        )
-        loss_test += loss
-        acc_test += score
-    acc_test /= 2
-    loss_test /= 2
-    return loss_test, acc_test
 
 
 # adapted from DGL
@@ -370,10 +414,10 @@ def load_data():
         )
     elif "Cluster" in args.dataloader:
         cluster_data = dataloaders.ClusterData(
-            data, num_parts=4, recursive=False, save_dir=dataset.processed_dir
+            data, num_parts=500, recursive=False, save_dir=dataset.processed_dir
         )
-        train_loader = dataloaders.ClusterLoader(
-            cluster_data, batch_size=20, shuffle=True, num_workers=4
+        loader = dataloaders.ClusterLoader(
+            cluster_data, batch_size=5, shuffle=True, num_workers=4
         )
     return dataset, loader
 
@@ -424,7 +468,7 @@ if __name__ == "__main__":
         args=args,
     ).to(device)
 
-    if "GCNII" in args.model:
+    if "GCN" in args.model and "II" in args.model:
         optimizer = optim.Adam(
             [
                 {"params": model.params1, "weight_decay": args.wd1},
@@ -432,7 +476,7 @@ if __name__ == "__main__":
             ],
             lr=args.lr,
         )
-    else:
+    elif "GCN" in args.model and "II" not in args.model:
         optimizer = optim.Adam(
             [
                 dict(params=model.params1, weight_decay=5e-4),
@@ -440,6 +484,10 @@ if __name__ == "__main__":
             ],
             lr=args.lr,
         )  # Only perform weight-decay on first convolution.
+    elif "SAGE" in args.model:
+        optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    elif 'GAT' in args.model:
+        optimizer = optim.Adam(model.parameters(), lr=0.005, weight_decay=5e-4)
 
     # Run
     t_total = time.time()
@@ -447,10 +495,9 @@ if __name__ == "__main__":
     best_epoch = 0
     acc = 0
     for epoch in range(args.epochs):
-        loss_train, acc_train = train(
+        loss_train, acc_train = train_gcn_dgg(
             args, model, optimizer, loader, device, epoch, writer
         )
-        acc_val = validate(args, model, loader, device, epoch, writer)[1]
         acc_test = test(args, model, loader, device, epoch, writer)[1]
 
         if (epoch + 1) % 1 == 0:
@@ -465,30 +512,7 @@ if __name__ == "__main__":
 
             writer.add_scalar("train/loss", loss_train, epoch)
             writer.add_scalar("train/acc", acc_train, epoch)
-            writer.add_scalar("val/acc", acc_val, epoch)
             writer.add_scalar("test/acc", acc_test, epoch)
-
-        if acc_val > acc:
-            acc = acc_val
-            best_epoch = epoch
-            acc = acc_val
-            # save_checkpoint(
-            #     checkpt_file, args, epoch, model, optimizer,
-            #     lr_scheduler="None"
-            # )
-            bad_counter = 0
-        else:
-            bad_counter += 1
-
-        if bad_counter == args.patience:
-            break
-
-    if args.test:
-        # acc = test_best(
-        #     args, model, test_feat, test_adj, test_labels,
-        #     test_nodes, loss_fcn, device
-        # )[1]
-        acc = acc_test
 
     print("Train cost: {:.4f}s".format(time.time() - t_total))
     print("Load {}th epoch".format(best_epoch))
