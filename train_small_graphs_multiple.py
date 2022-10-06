@@ -34,7 +34,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220901_cora_gategg00_multiple_models_semisup_fixedK2",
+    default="220922_cora_gcndgg00_multiple_noise",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -54,7 +54,7 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="cora", help="dateset")
+parser.add_argument("--data", default="citeseer", help="dateset")
 parser.add_argument("--split", default="public", help="dateset")
 parser.add_argument("--dev", type=int, default=0, help="device id")
 parser.add_argument("--alpha", type=float, default=0.1, help="alpha_l")
@@ -70,17 +70,17 @@ parser.add_argument(
     help="number of classes, set during runtime",
 )
 parser.add_argument("--backbone", type=str, default="GCN", help="model name")
-parser.add_argument("--model", type=str, default="GCN_DGG_Ablations", help="model name")
+parser.add_argument("--model", type=str, default="GCN_DGG_00", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.000,
+    default=0.00014,
     help="percentage of noisy edges to add",
 )
 parser.add_argument(
     "--remove_interclass_edges",
     type=float,
-    default=0.0,
+    default=1.0,
     help="What percent of interclass edges to remove",
 )
 # Differentiable graph generator specific
@@ -260,7 +260,8 @@ def train_gcn_dgg(args, model, optimizer, data, device, epoch, writer):
         out_adj.to_dense().T[mask],
         gt_adj.to(device).to_dense().float().T[mask]
     )
-    loss_train = loss_train_1 + loss_train_2 * 10000 + loss_train_3 * 10000
+    loss_train_4 = ptdnet_loss(out_adj)
+    loss_train = loss_train_1 + loss_train_2 * 10000 + loss_train_3 * 10000 + 0 * loss_train_4
     loss_train.backward()
 
     optimizer.step()
@@ -368,7 +369,7 @@ def test(model_gcn, model_gcn_dgg, data, device):
         #     gt_adj, data, device, features, labels, model_gcn
         # )
         # print("test")
-        # calc_learned_edges_stats(out_adj, adj, labels)
+        calc_learned_edges_stats(out_adj, adj, labels)
         return 0.0, acc_test.item()
 
 

@@ -32,7 +32,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220916_cora_gcndgg00_downstreamLoss",
+    default="220916_cora_gcndgg00_ptdnetLoss",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -362,7 +362,7 @@ def test(model, data, device):
             output[data.test_mask], labels[data.test_mask].to(device)
         )
         # print('test')
-        # calc_learned_edges_stats(out_adj, adj, labels)
+        calc_learned_edges_stats(out_adj, adj, labels)
         return loss_test.item(), acc_test.item()
 
 

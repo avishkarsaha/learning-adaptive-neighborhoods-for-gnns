@@ -35,7 +35,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220906_reddit_gcndgg00_multiloss",
+    default="220906_flickr_gcndgg00_multiloss",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -55,7 +55,7 @@ parser.add_argument(
     "--dropout", type=float, default=0.6, help="Dropout rate (1 - keep probability)."
 )
 parser.add_argument("--patience", type=int, default=2000, help="Patience")
-parser.add_argument("--data", default="Reddit", help="dateset")
+parser.add_argument("--data", default="Flickr", help="dateset")
 parser.add_argument(
     "--dataloader", default="SAINT", help="dataloader type"
 )
@@ -72,11 +72,11 @@ parser.add_argument(
     default=False,
     help="use normalization constants from graphsaint",
 )
-parser.add_argument("--model", type=str, default="GCN_DGG_00", help="model name")
+parser.add_argument("--model", type=str, default="GCN", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.000,
+    default=0.00014,
     help="percentage of noisy edges to add",
 )
 parser.add_argument(
@@ -495,7 +495,7 @@ if __name__ == "__main__":
     best_epoch = 0
     acc = 0
     for epoch in range(args.epochs):
-        loss_train, acc_train = train_gcn_dgg(
+        loss_train, acc_train = train_gcn(
             args, model, optimizer, loader, device, epoch, writer
         )
         acc_test = test(args, model, loader, device, epoch, writer)[1]

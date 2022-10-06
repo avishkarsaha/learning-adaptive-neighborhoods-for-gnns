@@ -27,7 +27,7 @@ parser.add_argument(
 parser.add_argument(
     "--expname",
     type=str,
-    default="220906_cora_gcn_edgeCentrality",
+    default="220922_cora_noise_debug",
     help="experiment name",
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
@@ -62,17 +62,17 @@ parser.add_argument(
     default=0,
     help="number of classes, set during runtime",
 )
-parser.add_argument("--model", type=str, default="GCN", help="model name")
+parser.add_argument("--model", type=str, default="SAGE", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.000,
+    default=0.00014,
     help="percentage of noisy edges to add",
 )
 parser.add_argument(
     "--remove_interclass_edges",
     type=float,
-    default=1.0,
+    default=0.0,
     help="What percent of interclass edges to remove",
 )
 # Differentiable graph generator specific

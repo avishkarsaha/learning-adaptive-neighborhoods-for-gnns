@@ -9,6 +9,9 @@ import pickle as pkl
 import networkx as nx
 import json
 
+from scipy.sparse.linalg import svds,eigsh
+from scipy.sparse import csc_matrix
+
 from networkx.algorithms import community as nx_comm
 from networkx.readwrite import json_graph
 import pdb
@@ -87,6 +90,7 @@ def sparse_mx_to_torch_sparse_tensor(sparse_mx):
 
 
 def add_noisy_edges(adj, noise_level=0.1):
+    noise_level = noise_level * 10
     np.random.seed(0)
     adj = sp.coo_matrix(adj)
 
@@ -102,6 +106,7 @@ def add_noisy_edges(adj, noise_level=0.1):
 
     noisy_adj = adj + noise
     noisy_adj = sp.csr_matrix(noisy_adj)
+    # print('noise level:', noisy_adj.sum() / adj.sum())
     return noisy_adj
 
 
@@ -1262,6 +1267,45 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError("Boolean value expected.")
 
+def ptdnet_loss(adj, k=5):
+    # adj_csc = csc_matrix(
+    #     adj.values().cpu().detach(), (adj.indices()[0], adj.indices()[1])
+    # )
+    # u, s, vh = svds(adj_csc, k=k)
+    adj = adj.to_dense()
+    AA = torch.matmul(adj.T, adj)   # [N, N]
+
+    try:
+        svd = torch.svd_lowrank(adj)
+        u = svd[0]      # [k]
+        s = svd[1]      # [N, k]
+        vh = svd[2].T   # [k, N]
+    except AssertionError:
+        svd = torch.linalg.svd(adj, full_matrices=False)
+        u = svd[0]      # [N, k]
+        s = svd[1]      # [k]
+        vh = svd[2].T   # [k, N]
+        k = len(s)
+
+    values = []
+    for i in range(k):
+        vi = vh[i].unsqueeze(-1)    # [N, 1]
+        vi = torch.matmul(AA, vi)   # [N, 1]
+        vi_norm = torch.linalg.norm(vi)
+        vi = vi / vi_norm
+
+        vmv = torch.matmul(vi.T, torch.matmul(AA, vi))
+        vv = torch.matmul(vi.T, vi)
+
+        t_vi = torch.sqrt((vmv / vv).abs())
+        values.append(t_vi)
+
+        if k > 1:
+            AA_minus = torch.matmul(AA, torch.matmul(vi, vi.T))
+            AA = AA - AA_minus
+
+    nuclear_loss = torch.stack(values).sum()
+    return nuclear_loss
 
 def remove_interclass_edges(adj, labels):
     """remove interclass edges using ground truth labels"""
@@ -1316,27 +1360,31 @@ def calc_learned_edges_stats(out_adj, in_adj, labels):
     u_label = labels[u_idx]
     v_label = labels[v_idx]
 
-    ic_edge_mask = u_label != v_label  # inter-class edge mask
-    ic_idxs = in_adj.indices()[:, ic_edge_mask]
-    non_ic_edge_mask = ~ic_edge_mask  # intra-class edge mask
-    non_ic_idxs = in_adj.indices()[:, non_ic_edge_mask]
+    inter_mask = u_label != v_label  # inter-class edge mask
+    inter_idxs = in_adj.indices()[:, inter_mask]
+    intra_mask = ~inter_mask  # intra-class edge mask
+    intra_idxs = in_adj.indices()[:, intra_mask]
 
     out_adj_on_edge = out_adj[u_idx, v_idx]
 
     # calculate ratios
-    ic_ratio = out_adj_on_edge[ic_edge_mask].sum() / ic_edge_mask.sum()
-    non_ic_ratio = out_adj_on_edge[non_ic_edge_mask].sum() / non_ic_edge_mask.sum()
-    ic_ratio_t = (
-        out_adj_on_edge[ic_edge_mask] > 0.4
-    ).float().sum() / ic_edge_mask.sum()
-    non_ic_ratio_t = (
-        out_adj_on_edge[non_ic_edge_mask] > 0.4
-    ).float().sum() / non_ic_edge_mask.sum()
+    inter_ratio = out_adj_on_edge[inter_mask].sum() / inter_mask.sum()
+    intra_ratio = out_adj_on_edge[intra_mask].sum() / intra_mask.sum()
+    inter_ratio_t = (
+        out_adj_on_edge[inter_mask] > 0.4
+    ).float().sum() / inter_mask.sum()
+    intra_ratio_t = (
+        out_adj_on_edge[intra_mask] > 0.4
+    ).float().sum() / intra_mask.sum()
 
-    print("inter class ratios {:.3f} {:.3f}".format(float(ic_ratio), float(ic_ratio_t)))
+    print(
+        "inter class ratios {:.3f} {:.3f}".format(
+            float(inter_ratio), float(inter_ratio_t)
+        )
+    )
     print(
         "intra class ratios {:.3f} {:.3f}".format(
-            float(non_ic_ratio), float(non_ic_ratio_t)
+            float(intra_ratio), float(intra_ratio_t)
         )
     )
 

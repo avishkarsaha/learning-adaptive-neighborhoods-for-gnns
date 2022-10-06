@@ -34,7 +34,7 @@ parser.add_argument(
     help="root directory",
 )
 parser.add_argument(
-    "--expname", type=str, default="220922_pubmed_gcn_GTAdj", help="experiment name"
+    "--expname", type=str, default="220917_pubmed_gcndgg00_ptdnetLoss", help="experiment name"
 )
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
@@ -70,11 +70,11 @@ parser.add_argument(
     default=False,
     help="use normalization constants from graphsaint",
 )
-parser.add_argument("--model", type=str, default="GCN", help="model name")
+parser.add_argument("--model", type=str, default="GCN_DGG_00", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
-    default=0.0042,
+    default=0.000,
     help="percentage of noisy edges to add",
 )
 parser.add_argument(
@@ -93,7 +93,7 @@ parser.add_argument(
 parser.add_argument(
     "--extra_edge_dim",
     type=int,
-    default=2,
+    default=0,
     help="extra edge dimension (for degree etc)",
 )
 parser.add_argument(
@@ -240,7 +240,9 @@ def train(args, model, optimizer, loader, device, epoch, writer):
 
         # forward pass
         output, out_adj, x_dgg = model(batch_feature, batch_adj, epoch, writer)
-        loss = F.nll_loss(output[data.train_mask], batch_label[data.train_mask])
+        loss_nll = F.nll_loss(output[data.train_mask], batch_label[data.train_mask])
+        loss_ptdnet = ptdnet_loss(out_adj, k=3)
+        loss = loss_nll
         acc_train = accuracy(output[data.train_mask], batch_label[data.train_mask])
 
         loss.backward()
