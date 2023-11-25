@@ -1,8 +1,0 @@
-1. k doesnt move unless it has to
-2. a lot of the time, k is useless as the edge probabilities do the job (i.e first_k doesnt
-   shape the edge probs as they all fit within it easily)
-3. what if input graph is not based on kNN?
-4. start with knn and add positive and negative noise
-5. what indications do we need on the toy problem that would convince us
-   the model is working and will work on larger datasets? list all cases
-6. model needs ability to create new edges rather than just removing current edges

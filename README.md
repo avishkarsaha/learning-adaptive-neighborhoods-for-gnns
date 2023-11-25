@@ -1,63 +1,55 @@
-# Simple and Deep Graph Convolutional Networks
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/simple-and-deep-graph-convolutional-networks/node-classification-on-cora-full-supervised)](https://paperswithcode.com/sota/node-classification-on-cora-full-supervised?p=simple-and-deep-graph-convolutional-networks)
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/simple-and-deep-graph-convolutional-networks/node-classification-on-pubmed-full-supervised)](https://paperswithcode.com/sota/node-classification-on-pubmed-full-supervised?p=simple-and-deep-graph-convolutional-networks)
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/simple-and-deep-graph-convolutional-networks/node-classification-on-cora-with-public-split)](https://paperswithcode.com/sota/node-classification-on-cora-with-public-split?p=simple-and-deep-graph-convolutional-networks)
-[![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/simple-and-deep-graph-convolutional-networks/node-classification-on-ppi)](https://paperswithcode.com/sota/node-classification-on-ppi?p=simple-and-deep-graph-convolutional-networks)
+## Learning Adaptive Neighborhoods for Graph Neural Networks
 
-This repository contains a PyTorch implementation of "Simple and Deep Graph Convolutional Networks".(https://arxiv.org/abs/2007.02133)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 
-## Dependencies
+This repository contains a PyTorch implementation of the ICCV 2023 paper "[Learning Adaptive Neighborhoods for Graph Neural Networks](https://openaccess.thecvf.com/content/ICCV2023/html/Saha_Learning_Adaptive_Neighborhoods_for_Graph_Neural_Networks_ICCV_2023_paper.html)".
+
+This repository is based on https://github.com/chennnM/GCNII, we use their 
+repository structure and their training scripts. We thank the authors for their
+code.
+
+
+
+### Dependencies
 - CUDA 10.1
 - python 3.6.9
-- pytorch 1.3.1
+- pytorch 1.9.0
 - networkx 2.1
 - scikit-learn
+- torch_geometric 2.1.0
 
-## Datasets
+### Datasets
 
-The `data` folder contains three benchmark datasets(Cora, Citeseer, Pubmed), and the `newdata` folder contains four datasets(Chameleon, Cornell, Texas, Wisconsin) from [Geom-GCN](https://github.com/graphdml-uiuc-jlu/geom-gcn). We use the same semi-supervised setting as [GCN](https://github.com/tkipf/gcn) and the same full-supervised setting as Geom-GCN. PPI can be downloaded from [GraphSAGE](http://snap.stanford.edu/graphsage/).
+ We have maintained the datasets from the GCNII repository, with the
+ `data` folder containing three benchmark datasets(Cora, Citeseer, Pubmed).
+ 
 
-## Results
-Testing accuracy summarized below.
-| Dataset | Depth |  Metric | Dataset | Depth |  Metric |
-|:---:|:---:|:---:|:---:|:---:|:---:|
-| Cora       | 64 | 85.5  | Cham | 8  | 62.48 |
-| Cite       | 32 | 73.4  | Corn | 16 | 76.49 |
-| Pubm       | 16 | 80.3  | Texa | 32 | 77.84 |
-| Cora(full) | 64 | 88.49 | Wisc | 16 | 81.57 |
-| Cite(full) | 64 | 77.13 | PPI  | 9  | 99.56 |
-| Pubm(full) | 64 | 90.30 | obgn-arxiv | 16 | 72.74 |
+### Models
+We have integrated our Differentiable Graph Generator (DGG) into the following
+graph neural network models:
+1. GCNII
+2. GAT
+3. SAGE
+4. GCN
 
+These models are available in the ```models.py``` file. Pretrained models are
+coming soon!
 
-## Usage
-
-- To replicate the semi-supervised results, run the following script
-```sh
-sh semi.sh
+### Usage
+To run the training pipelines, use the following command:
 ```
-- To replicate the full-supervised results, run the following script
-```sh
-sh full.sh
+python train_small_graphs.py --dataset cora --model GCN_DGG 
 ```
-- To replicate the inductive results of PPI, run the following script
-```sh
-sh ppi.sh
-```
-## Reference implementation
-The `PyG` folder includes a simple *PyTorch Geometric* implementation of GCNII.
-Requirements: `torch-geometric >= 1.5.0` and  `ogb >= 1.2.0`.
-- Running examples
-```
-python cora.py
-python arxiv.py
-```
+The arguments for the DGG can be found in the training scripts. 
 
-## Citation
+### Citation
 ```
-@article{chenWHDL2020gcnii,
-  title = {Simple and Deep Graph Convolutional Networks},
-  author = {Ming Chen, Zhewei Wei and Zengfeng Huang, Bolin Ding and Yaliang Li},
-  year = {2020},
-  booktitle = {Proceedings of the 37th International Conference on Machine Learning},
+@InProceedings{Saha_2023_ICCV,
+    author    = {Saha, Avishkar and Mendez, Oscar and Russell, Chris and Bowden, Richard},
+    title     = {Learning Adaptive Neighborhoods for Graph Neural Networks},
+    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+    month     = {October},
+    year      = {2023},
+    pages     = {22541-22550}
 }
 ```

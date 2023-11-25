@@ -62,7 +62,7 @@ parser.add_argument(
     default=0,
     help="number of classes, set during runtime",
 )
-parser.add_argument("--model", type=str, default="SAGE", help="model name")
+parser.add_argument("--model", type=str, default="GCN_DGG", help="model name")
 parser.add_argument(
     "--edge_noise_level",
     type=float,
