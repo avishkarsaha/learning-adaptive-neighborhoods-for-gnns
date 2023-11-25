@@ -13,7 +13,7 @@ code.
 ### Dependencies
 - CUDA 10.1
 - python 3.6.9
-- pytorch 1.9.0
+- pytorch 1.9.1
 - networkx 2.1
 - scikit-learn
 - torch_geometric 2.1.0
